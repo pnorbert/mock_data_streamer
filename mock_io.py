@@ -11,10 +11,14 @@ class IO(ABC):
         connection_info = cls._read_connection_info(settings.destination)
         io_id = connection_info.get("id", "adios") if connection_info else "adios"
 
-        if io_id == "socket":
+        if io_id == "sockets":
             from socket_io import SocketIO
 
             return SocketIO(settings, connection_info)
+        if io_id == "singlesocket":
+            from single_socket_io import SingleSocketIO
+
+            return SingleSocketIO(settings, connection_info)
         if io_id == "adios":
             from adios_io import AdiosIO
 

@@ -10,14 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from adios_io import AdiosIO
-from socket_io import VARIABLE_PAIRS
+from single_socket_io import VARIABLES
 from socket_protocol import receive_hello, receive_message
 from timing_log import TimingLog, timestamp
 
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="Receive mockProducer arrays over three TCP connections."
+        description="Receive all mockProducer arrays over one TCP connection."
     )
     parser.add_argument("connection_file", help="rendezvous file to create")
     parser.add_argument("output", help="ADIOS output data file/stream")
@@ -37,8 +37,8 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--timing-log",
-        default="mockConsumerSockets.log",
-        help="timing log file (default: mockConsumerSockets.log)",
+        default="mockConsumerSingleSocket.log",
+        help="timing log file (default: mockConsumerSingleSocket.log)",
     )
     return parser.parse_args(argv)
 
@@ -48,7 +48,7 @@ def create_listener(bind_host):
     try:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((bind_host, 0))
-        listener.listen(len(VARIABLE_PAIRS))
+        listener.listen(1)
     except Exception:
         listener.close()
         raise
@@ -57,7 +57,7 @@ def create_listener(bind_host):
 
 def write_connection_file(path, advertise_host, listener, session_id):
     connection_info = {
-        "id": "sockets",
+        "id": "singlesocket",
         "consumer_id": session_id,
         "host": advertise_host,
         "port": listener.getsockname()[1],
@@ -79,83 +79,52 @@ def remove_own_connection_file(path, session_id):
         pass
 
 
-def accept_connections(listener, session_id):
-    by_variables = {}
+def accept_connection(listener, session_id):
+    connection, address = listener.accept()
     try:
-        for _ in VARIABLE_PAIRS:
-            connection, address = listener.accept()
-            pair, requested_consumer_id = receive_hello(connection)
-            if requested_consumer_id != session_id:
-                connection.close()
-                raise RuntimeError("Producer used stale socket connection information")
-            if pair not in VARIABLE_PAIRS:
-                connection.close()
-                raise RuntimeError(f"Unknown variable channel: {pair}")
-            if pair in by_variables:
-                connection.close()
-                raise RuntimeError(f"Duplicate variable channel: {pair}")
-            by_variables[pair] = connection
-            print(
-                f"Connected {'/'.join(pair)} from {address[0]}:{address[1]}",
-                flush=True,
+        variables, requested_consumer_id = receive_hello(connection)
+        if requested_consumer_id != session_id:
+            raise RuntimeError("Producer used stale socket connection information")
+        if variables != VARIABLES:
+            raise RuntimeError(
+                f"Expected variables {list(VARIABLES)}, received {list(variables)}"
             )
     except Exception:
-        for connection in by_variables.values():
-            connection.close()
+        connection.close()
         raise
-    return [by_variables[pair] for pair in VARIABLE_PAIRS]
+    print(
+        f"Connected all variables from {address[0]}:{address[1]}",
+        flush=True,
+    )
+    return connection
 
 
-def receive_steps(connections, output, engine, timing_log):
+def receive_steps(connection, output, engine, timing_log):
     io = None
     step = 0
     try:
         while True:
-            receive_all_started_at = timestamp()
-            receive_all_start = time.perf_counter()
-            messages = []
-            receive_records = []
-            for pair, connection in zip(VARIABLE_PAIRS, connections):
-                receive_started_at = timestamp()
-                receive_start = time.perf_counter()
-                message = receive_message(connection)
-                receive_completed_at = timestamp()
-                if message is not None:
-                    receive_records.append(
-                        {
-                            "step": step,
-                            "variables": list(pair),
-                            "started_at": receive_started_at,
-                            "completed_at": receive_completed_at,
-                            "duration_seconds": time.perf_counter() - receive_start,
-                        }
-                    )
-                messages.append(message)
-
-            receive_all_completed_at = timestamp()
-            receive_all_duration = time.perf_counter() - receive_all_start
-            if all(message is None for message in messages):
+            receive_started_at = timestamp()
+            receive_start = time.perf_counter()
+            variables = receive_message(connection)
+            receive_completed_at = timestamp()
+            receive_duration = time.perf_counter() - receive_start
+            if variables is None:
                 return
-            if any(message is None for message in messages):
-                raise RuntimeError("Socket channels ended at different times")
-            for record in receive_records:
-                timing_log.record("socket.receive", **record)
-            timing_log.record(
-                "socket.receive_all",
-                step=step,
-                variables=[name for pair in VARIABLE_PAIRS for name in pair],
-                started_at=receive_all_started_at,
-                completed_at=receive_all_completed_at,
-                duration_seconds=receive_all_duration,
-            )
+            if set(variables) != set(VARIABLES):
+                raise RuntimeError(
+                    f"Expected {list(VARIABLES)}, received {sorted(variables)}"
+                )
 
-            variables = {}
-            for pair, received in zip(VARIABLE_PAIRS, messages):
-                if set(received) != set(pair):
-                    raise RuntimeError(
-                        f"Expected {'/'.join(pair)}, received {sorted(received)}"
-                    )
-                variables.update(received)
+            receive_fields = {
+                "step": step,
+                "variables": list(VARIABLES),
+                "started_at": receive_started_at,
+                "completed_at": receive_completed_at,
+                "duration_seconds": receive_duration,
+            }
+            timing_log.record("socket.receive", **receive_fields)
+            timing_log.record("socket.receive_all", **receive_fields)
 
             if io is None:
                 shape = variables["d1"].shape
@@ -208,7 +177,7 @@ def main(argv=None):
     session_id = str(uuid.uuid4())
     timing_log = TimingLog(args.timing_log)
     listener = None
-    connections = []
+    connection = None
 
     try:
         listener = create_listener(args.bind_host)
@@ -216,11 +185,11 @@ def main(argv=None):
             connection_path, advertise_host, listener, session_id
         )
         print(f"Connection info written to {connection_path}", flush=True)
-        connections = accept_connections(listener, session_id)
-        receive_steps(connections, args.output, args.engine, timing_log)
-        print("Producer closed all socket channels", flush=True)
+        connection = accept_connection(listener, session_id)
+        receive_steps(connection, args.output, args.engine, timing_log)
+        print("Producer closed the socket channel", flush=True)
     finally:
-        for connection in connections:
+        if connection is not None:
             connection.close()
         if listener is not None:
             listener.close()
