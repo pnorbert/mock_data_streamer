@@ -29,9 +29,16 @@ opens the three data connections. It writes the initial state immediately and
 then writes approximately every three seconds. The consumer stores the 10
 received steps in `received.bp` using ADIOS BP5.
 
-The timing logs are line-delimited JSON. The producer log records each socket
-write call, and the consumer log records the three receives, their combined
-duration, and each output write.
+Producer output is queued and sent by a background thread, so a slow output
+does not pause the simulation. The queue holds 600 seconds of output by default;
+set another duration with `--buffer-seconds SECONDS`. If the queue fills, every
+other queued step is discarded, one per new step, to make room for the newest
+step. Remaining queued steps are flushed when the producer exits.
+
+The timing logs are line-delimited JSON. The producer log records each output
+enqueue call and an `io.buffer_drop` event for each overflow eviction, including
+the dropped and incoming step numbers. The consumer log records the three
+receives, their combined duration, and each output write.
 
 ## Single-socket version
 

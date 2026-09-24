@@ -15,13 +15,14 @@ OUTPUT_INTERVAL_SECONDS = 3.0
 def print_usage():
     print(
         "Usage: mockProducer.py destination nx ny steps [engine] "
-        "[--timing-log FILE]\n"
+        "[--timing-log FILE] [--buffer-seconds SECONDS]\n"
         "  destination: ADIOS output or a socket connection-info file\n"
         "  nx:     local array size in X dimension per processor\n"
         "  ny:     local array size in Y dimension per processor\n"
         "  steps:  the total number of steps to output\n"
         "  engine: optional adios2 engine, BP5 or HDF5\n"
         "  --timing-log: timing log file (default: mockProducer.log)\n"
+        "  --buffer-seconds: queued output duration (default: 600)\n"
     )
 
 
@@ -29,11 +30,27 @@ class Settings:
     def __init__(self, argv):
         arguments = list(argv)
         self.timing_log = "mockProducer.log"
+        self.buffer_seconds = 600.0
+        self.output_interval_seconds = OUTPUT_INTERVAL_SECONDS
         if "--timing-log" in arguments:
             option = arguments.index("--timing-log")
             if option + 1 >= len(arguments):
                 raise ValueError("Missing file name after --timing-log")
             self.timing_log = arguments[option + 1]
+            del arguments[option : option + 2]
+
+        if "--buffer-seconds" in arguments:
+            option = arguments.index("--buffer-seconds")
+            if option + 1 >= len(arguments):
+                raise ValueError("Missing duration after --buffer-seconds")
+            try:
+                self.buffer_seconds = float(arguments[option + 1])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid buffer duration: {arguments[option + 1]}"
+                ) from exc
+            if not math.isfinite(self.buffer_seconds) or self.buffer_seconds <= 0:
+                raise ValueError("Buffer duration must be greater than zero")
             del arguments[option : option + 2]
 
         if len(arguments) not in (5, 6):
@@ -142,7 +159,7 @@ def timed_write(io, ht, step, timing_log):
     called_at = timestamp()
     start = time.perf_counter()
     try:
-        io.write(ht)
+        io.write(ht, step=step)
     except Exception as exc:
         timing_log.record(
             "io.write",
@@ -172,10 +189,11 @@ def heat2d(args: list[str]):
         print(f"Array size             : {settings.ndx} x {settings.ndy}")
         print(f"Number of output steps : {settings.steps}")
         print(f"Output interval        : {OUTPUT_INTERVAL_SECONDS:g} seconds")
+        print(f"Output buffer          : {settings.buffer_seconds:g} seconds")
         print(f"Using engine           : {settings.engine}")
 
         ht = HeatTransfer(settings)
-        io = IO.create(settings)
+        io = IO.create(settings, timing_log=timing_log)
 
         print("Simulation step 0: initialization")
         ht.init()
@@ -191,6 +209,10 @@ def heat2d(args: list[str]):
                 ht.heatEdges()
             timed_write(io, ht, step, timing_log)
             next_write_time += OUTPUT_INTERVAL_SECONDS
+
+        io.close()
+        if io.dropped_steps:
+            print(f"Dropped output steps    : {io.dropped_steps}")
         time_end = time.perf_counter()
         print(f"Total runtime = {time_end - time_start}s")
     except ValueError as exc:
@@ -206,10 +228,12 @@ def heat2d(args: list[str]):
         print(exc)
         raise exc
     finally:
-        if io is not None:
-            io.close()
-        if timing_log is not None:
-            timing_log.close()
+        try:
+            if io is not None:
+                io.close()
+        finally:
+            if timing_log is not None:
+                timing_log.close()
 
 
 if __name__ == "__main__":
