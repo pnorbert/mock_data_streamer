@@ -98,11 +98,13 @@ def accept_connection(listener, session_id):
     return connection
 
 
-def receive_steps(connection, output, engine, timing_log):
+def receive_steps(connection, output, engine, timing_log, before_receive=None):
     io = None
     step = 0
     try:
         while True:
+            if before_receive is not None:
+                before_receive(step)
             receive_started_at = timestamp()
             receive_start = time.perf_counter()
             variables = receive_message(connection)

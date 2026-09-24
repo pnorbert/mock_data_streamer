@@ -59,6 +59,24 @@ python3 mockProducer.py single-connection.json 512 512 10 \
     --timing-log single-producer-timing.jsonl
 ```
 
+### Deliberately blocking test consumer
+
+`mockConsumerSingleSocketBlocking.py` exercises producer buffering by sleeping
+for a random 1–100 seconds before socket reads. The range, probability, random
+seed, and maximum number of stalls are configurable. For example:
+
+```bash
+python3 mockConsumerSingleSocketBlocking.py connection.json received.bp \
+    --random-seed 42 --max-blocks 1
+```
+
+Run the deterministic long-buffer/short-buffer integration test with:
+
+```bash
+MOCKAPP_RUN_SOCKET_INTEGRATION=1 \
+    python3 -m unittest -v test_buffered_single_socket.py
+```
+
 ## Running without ADIOS2
 
 The consumers do not require the `adios2` Python module. When it is unavailable,
