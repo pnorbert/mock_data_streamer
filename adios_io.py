@@ -1,11 +1,21 @@
-import adios2
 import numpy as np
 
 from mock_io import IO
 
+try:
+    import adios2
+except ImportError:
+    adios2 = None
+
+
+ADIOS2_AVAILABLE = adios2 is not None
+
 
 class AdiosIO(IO):
     def __init__(self, settings, connection_info=None):
+        if not ADIOS2_AVAILABLE:
+            raise RuntimeError("adios2 is not available")
+
         connection_info = connection_info or {}
         output = connection_info.get("output", settings.destination)
         engine = connection_info.get("engine", settings.engine)

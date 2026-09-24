@@ -31,7 +31,7 @@ received steps in `received.bp` using ADIOS BP5.
 
 The timing logs are line-delimited JSON. The producer log records each socket
 write call, and the consumer log records the three receives, their combined
-duration, and each ADIOS write.
+duration, and each output write.
 
 ## Single-socket version
 
@@ -50,6 +50,25 @@ In a second terminal, run the producer with a 512x512 array and 10 output steps:
 ```bash
 python3 mockProducer.py single-connection.json 512 512 10 \
     --timing-log single-producer-timing.jsonl
+```
+
+## Running without ADIOS2
+
+The consumers do not require the `adios2` Python module. When it is unavailable,
+an output argument such as `received.bp` is automatically changed to
+`received.pkl`. The pickle file contains one dictionary per received step, with
+keys `d1` through `d6`. Read all steps from the pickle stream with:
+
+```python
+import pickle
+
+steps = []
+with open("received.pkl", "rb") as stream:
+    while True:
+        try:
+            steps.append(pickle.load(stream))
+        except EOFError:
+            break
 ```
 
 For a consumer accepting connections from another host, specify both the bind

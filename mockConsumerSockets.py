@@ -7,9 +7,8 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 
-from adios_io import AdiosIO
+from consumer_output import create_consumer_output
 from socket_io import VARIABLE_PAIRS
 from socket_protocol import receive_hello, receive_message
 from timing_log import TimingLog, timestamp
@@ -20,7 +19,7 @@ def parse_args(argv):
         description="Receive mockProducer arrays over three TCP connections."
     )
     parser.add_argument("connection_file", help="rendezvous file to create")
-    parser.add_argument("output", help="ADIOS output data file/stream")
+    parser.add_argument("output", help="ADIOS output, or pickle output fallback")
     parser.add_argument(
         "--engine",
         default="BP5",
@@ -161,13 +160,7 @@ def receive_steps(connections, output, engine, timing_log):
                 shape = variables["d1"].shape
                 if len(shape) != 2:
                     raise RuntimeError(f"Expected 2-D arrays, received shape {shape}")
-                settings = SimpleNamespace(
-                    destination=output,
-                    engine=engine,
-                    ndx=shape[0],
-                    ndy=shape[1],
-                )
-                io = AdiosIO(settings)
+                io = create_consumer_output(output, engine, shape)
 
             write_called_at = timestamp()
             write_start = time.perf_counter()
