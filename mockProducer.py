@@ -6,6 +6,7 @@ import time
 import numpy as np
 
 from mock_io import IO
+from timing_log import TimingLog, timestamp
 
 
 OUTPUT_INTERVAL_SECONDS = 3.0
@@ -13,27 +14,38 @@ OUTPUT_INTERVAL_SECONDS = 3.0
 
 def print_usage():
     print(
-        "Usage: mockProducer.py   destination  nx  ny  steps  [engine]\n"
+        "Usage: mockProducer.py destination nx ny steps [engine] "
+        "[--timing-log FILE]\n"
         "  destination: ADIOS output or a socket connection-info file\n"
         "  nx:     local array size in X dimension per processor\n"
         "  ny:     local array size in Y dimension per processor\n"
         "  steps:  the total number of steps to output\n"
         "  engine: optional adios2 engine, BP5 or HDF5\n"
+        "  --timing-log: timing log file (default: mockProducer.log)\n"
     )
 
 
 class Settings:
     def __init__(self, argv):
-        if len(argv) not in (5, 6):
+        arguments = list(argv)
+        self.timing_log = "mockProducer.log"
+        if "--timing-log" in arguments:
+            option = arguments.index("--timing-log")
+            if option + 1 >= len(arguments):
+                raise ValueError("Missing file name after --timing-log")
+            self.timing_log = arguments[option + 1]
+            del arguments[option : option + 2]
+
+        if len(arguments) not in (5, 6):
             raise ValueError("Invalid number of arguments")
 
         self.configfile = "adios2.xml"
-        self.destination = argv[1]
-        self.ndx = self.convert_to_uint("nx", argv[2])
-        self.ndy = self.convert_to_uint("ny", argv[3])
-        self.steps = self.convert_to_uint("steps", argv[4])
-        if len(argv) == 6:
-            self.engine = argv[5]
+        self.destination = arguments[1]
+        self.ndx = self.convert_to_uint("nx", arguments[2])
+        self.ndy = self.convert_to_uint("ny", arguments[3])
+        self.steps = self.convert_to_uint("steps", arguments[4])
+        if len(arguments) == 6:
+            self.engine = arguments[5]
         else:
             self.engine = "BP5"
 
@@ -126,11 +138,37 @@ class HeatTransfer:
         return self.m_TCurrent[1 : self.m_s.ndx + 1, 1 : self.m_s.ndy + 1].copy()
 
 
+def timed_write(io, ht, step, timing_log):
+    called_at = timestamp()
+    start = time.perf_counter()
+    try:
+        io.write(ht)
+    except Exception as exc:
+        timing_log.record(
+            "io.write",
+            step=step,
+            called_at=called_at,
+            duration_seconds=time.perf_counter() - start,
+            status="error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    timing_log.record(
+        "io.write",
+        step=step,
+        called_at=called_at,
+        duration_seconds=time.perf_counter() - start,
+        status="ok",
+    )
+
+
 def heat2d(args: list[str]):
     io = None
+    timing_log = None
     try:
         time_start = time.perf_counter()
         settings = Settings(args)
+        timing_log = TimingLog(settings.timing_log)
         print(f"Array size             : {settings.ndx} x {settings.ndy}")
         print(f"Number of output steps : {settings.steps}")
         print(f"Output interval        : {OUTPUT_INTERVAL_SECONDS:g} seconds")
@@ -144,14 +182,14 @@ def heat2d(args: list[str]):
         ht.heatEdges()
 
         next_write_time = time.perf_counter() + OUTPUT_INTERVAL_SECONDS
-        io.write(ht)
+        timed_write(io, ht, 0, timing_log)
 
         for step in range(1, settings.steps):
             print(f"Simulation step {step}")
             while time.perf_counter() < next_write_time:
                 ht.iterate()
                 ht.heatEdges()
-            io.write(ht)
+            timed_write(io, ht, step, timing_log)
             next_write_time += OUTPUT_INTERVAL_SECONDS
         time_end = time.perf_counter()
         print(f"Total runtime = {time_end - time_start}s")
@@ -170,6 +208,8 @@ def heat2d(args: list[str]):
     finally:
         if io is not None:
             io.close()
+        if timing_log is not None:
+            timing_log.close()
 
 
 if __name__ == "__main__":

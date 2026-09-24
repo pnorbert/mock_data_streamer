@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import sys
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 from adios_io import AdiosIO
 from socket_io import VARIABLE_PAIRS
 from socket_protocol import receive_hello, receive_message
+from timing_log import TimingLog, timestamp
 
 
 def parse_args(argv):
@@ -32,6 +34,11 @@ def parse_args(argv):
     parser.add_argument(
         "--advertise-host",
         help="host name written to the file (default: bind host)",
+    )
+    parser.add_argument(
+        "--timing-log",
+        default="mockConsumerSockets.log",
+        help="timing log file (default: mockConsumerSockets.log)",
     )
     return parser.parse_args(argv)
 
@@ -99,16 +106,48 @@ def accept_connections(listener, session_id):
     return [by_variables[pair] for pair in VARIABLE_PAIRS]
 
 
-def receive_steps(connections, output, engine):
+def receive_steps(connections, output, engine, timing_log):
     io = None
     step = 0
     try:
         while True:
-            messages = [receive_message(connection) for connection in connections]
+            receive_all_started_at = timestamp()
+            receive_all_start = time.perf_counter()
+            messages = []
+            receive_records = []
+            for pair, connection in zip(VARIABLE_PAIRS, connections):
+                receive_started_at = timestamp()
+                receive_start = time.perf_counter()
+                message = receive_message(connection)
+                receive_completed_at = timestamp()
+                if message is not None:
+                    receive_records.append(
+                        {
+                            "step": step,
+                            "variables": list(pair),
+                            "started_at": receive_started_at,
+                            "completed_at": receive_completed_at,
+                            "duration_seconds": time.perf_counter() - receive_start,
+                        }
+                    )
+                messages.append(message)
+
+            receive_all_completed_at = timestamp()
+            receive_all_duration = time.perf_counter() - receive_all_start
             if all(message is None for message in messages):
                 return
             if any(message is None for message in messages):
                 raise RuntimeError("Socket channels ended at different times")
+            for record in receive_records:
+                timing_log.record("socket.receive", **record)
+            timing_log.record(
+                "socket.receive_all",
+                step=step,
+                variables=[name for pair in VARIABLE_PAIRS for name in pair],
+                started_at=receive_all_started_at,
+                completed_at=receive_all_completed_at,
+                duration_seconds=receive_all_duration,
+            )
 
             variables = {}
             for pair, received in zip(VARIABLE_PAIRS, messages):
@@ -130,7 +169,27 @@ def receive_steps(connections, output, engine):
                 )
                 io = AdiosIO(settings)
 
-            io.write_data(variables)
+            write_called_at = timestamp()
+            write_start = time.perf_counter()
+            try:
+                io.write_data(variables)
+            except Exception as exc:
+                timing_log.record(
+                    "io.write",
+                    step=step,
+                    called_at=write_called_at,
+                    duration_seconds=time.perf_counter() - write_start,
+                    status="error",
+                    error_type=type(exc).__name__,
+                )
+                raise
+            timing_log.record(
+                "io.write",
+                step=step,
+                called_at=write_called_at,
+                duration_seconds=time.perf_counter() - write_start,
+                status="ok",
+            )
             summary = ", ".join(
                 f"{name}={value.shape}/{value.dtype}"
                 for name, value in sorted(variables.items())
@@ -147,22 +206,26 @@ def main(argv=None):
     connection_path = Path(args.connection_file)
     advertise_host = args.advertise_host or args.bind_host
     session_id = str(uuid.uuid4())
-    listener = create_listener(args.bind_host)
+    timing_log = TimingLog(args.timing_log)
+    listener = None
     connections = []
 
     try:
+        listener = create_listener(args.bind_host)
         write_connection_file(
             connection_path, advertise_host, listener, session_id
         )
         print(f"Connection info written to {connection_path}", flush=True)
         connections = accept_connections(listener, session_id)
-        receive_steps(connections, args.output, args.engine)
+        receive_steps(connections, args.output, args.engine, timing_log)
         print("Producer closed all socket channels", flush=True)
     finally:
         for connection in connections:
             connection.close()
-        listener.close()
+        if listener is not None:
+            listener.close()
         remove_own_connection_file(connection_path, session_id)
+        timing_log.close()
 
 
 if __name__ == "__main__":
