@@ -18,8 +18,8 @@ def parse_args():
     parser.add_argument(
         "pickle_file",
         nargs="?",
-        default="out-singlesocket.pkl",
-        help="pickle stream to inspect (default: out-singlesocket.pkl)",
+        default="received.pkl",
+        help="pickle stream to inspect (default: received.pkl)",
     )
     return parser.parse_args()
 
