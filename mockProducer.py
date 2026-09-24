@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+import math
+import sys
+import time
+
+import numpy as np
+
+from mock_io import IO
+
+
+OUTPUT_INTERVAL_SECONDS = 3.0
+
+
+def print_usage():
+    print(
+        "Usage: mockProducer.py   destination  nx  ny  steps  [engine]\n"
+        "  destination: ADIOS output or a socket connection-info file\n"
+        "  nx:     local array size in X dimension per processor\n"
+        "  ny:     local array size in Y dimension per processor\n"
+        "  steps:  the total number of steps to output\n"
+        "  engine: optional adios2 engine, BP5 or HDF5\n"
+    )
+
+
+class Settings:
+    def __init__(self, argv):
+        if len(argv) not in (5, 6):
+            raise ValueError("Invalid number of arguments")
+
+        self.configfile = "adios2.xml"
+        self.destination = argv[1]
+        self.ndx = self.convert_to_uint("nx", argv[2])
+        self.ndy = self.convert_to_uint("ny", argv[3])
+        self.steps = self.convert_to_uint("steps", argv[4])
+        if len(argv) == 6:
+            self.engine = argv[5]
+        else:
+            self.engine = "BP5"
+
+    def convert_to_uint(self, var_name, arg):
+        try:
+            value = int(arg, 10)
+        except ValueError as exc:
+            raise ValueError(f"Invalid value given for {var_name}: {arg}") from exc
+        if value < 0:
+            raise ValueError(f"Negative value given for {var_name}: {arg}")
+        return value
+
+
+class HeatTransfer:
+    def __init__(self, settings):
+        self.edgetemp = 100.0
+        self.omega = 0.8
+        self.m_s = settings
+
+        shape = (self.m_s.ndx + 2, self.m_s.ndy + 2)
+        self.m_T1 = np.empty(shape, dtype=np.float64)
+        self.m_T2 = np.empty(shape, dtype=np.float64)
+        self.m_TCurrent = self.m_T1
+        self.m_TNext = self.m_T2
+
+    def init(self):
+        pi = 4.0 * math.atan(1.0)
+        hx = 2.0 * pi / self.m_s.ndx
+        hy = 2.0 * pi / self.m_s.ndy
+        minv = 1.0e30
+        maxv = -1.0e30
+        for i in range(self.m_s.ndx + 2):
+            x = hx * (i - 1)
+            for j in range(self.m_s.ndy + 2):
+                y = hy * (j - 1)
+                v = (
+                    math.cos(8 * x)
+                    + math.cos(6 * x)
+                    - math.cos(4 * x)
+                    + math.cos(2 * x)
+                    - math.cos(x)
+                    + math.sin(8 * y)
+                    - math.sin(6 * y)
+                    + math.sin(4 * y)
+                    - math.sin(2 * y)
+                    + math.sin(y)
+                )
+                if v < minv:
+                    minv = v
+                if v > maxv:
+                    maxv = v
+                self.m_T1[i, j] = v
+
+        skew = 0.0 - minv
+        ratio = 2 * self.edgetemp / (maxv - minv)
+        self.m_T1 += skew
+        self.m_T1 *= ratio
+
+        self.m_TCurrent = self.m_T1
+        self.m_TNext = self.m_T2
+
+    def switchCurrentNext(self):
+        tmp = self.m_TCurrent
+        self.m_TCurrent = self.m_TNext
+        self.m_TNext = tmp
+
+    def iterate(self):
+        for i in range(1, self.m_s.ndx + 1):
+            for j in range(1, self.m_s.ndy + 1):
+                self.m_TNext[i, j] = (
+                    self.omega
+                    / 4
+                    * (
+                        self.m_TCurrent[i - 1, j]
+                        + self.m_TCurrent[i + 1, j]
+                        + self.m_TCurrent[i, j - 1]
+                        + self.m_TCurrent[i, j + 1]
+                    )
+                    + (1.0 - self.omega) * self.m_TCurrent[i, j]
+                )
+        self.switchCurrentNext()
+
+    def heatEdges(self):
+        self.m_TCurrent[0, :] = self.edgetemp
+        self.m_TCurrent[self.m_s.ndx + 1, :] = self.edgetemp
+        self.m_TCurrent[:, 0] = self.edgetemp
+        self.m_TCurrent[:, self.m_s.ndy + 1] = self.edgetemp
+
+    def data_noghost(self):
+        return self.m_TCurrent[1 : self.m_s.ndx + 1, 1 : self.m_s.ndy + 1].copy()
+
+
+def heat2d(args: list[str]):
+    io = None
+    try:
+        time_start = time.perf_counter()
+        settings = Settings(args)
+        print(f"Array size             : {settings.ndx} x {settings.ndy}")
+        print(f"Number of output steps : {settings.steps}")
+        print(f"Output interval        : {OUTPUT_INTERVAL_SECONDS:g} seconds")
+        print(f"Using engine           : {settings.engine}")
+
+        ht = HeatTransfer(settings)
+        io = IO.create(settings)
+
+        print("Simulation step 0: initialization")
+        ht.init()
+        ht.heatEdges()
+
+        next_write_time = time.perf_counter() + OUTPUT_INTERVAL_SECONDS
+        io.write(ht)
+
+        for step in range(1, settings.steps):
+            print(f"Simulation step {step}")
+            while time.perf_counter() < next_write_time:
+                ht.iterate()
+                ht.heatEdges()
+            io.write(ht)
+            next_write_time += OUTPUT_INTERVAL_SECONDS
+        time_end = time.perf_counter()
+        print(f"Total runtime = {time_end - time_start}s")
+    except ValueError as exc:
+        print(exc)
+        print_usage()
+        raise exc
+    except OSError as exc:
+        print("I/O base exception caught")
+        print(exc)
+        raise exc
+    except Exception as exc:
+        print("Exception caught")
+        print(exc)
+        raise exc
+    finally:
+        if io is not None:
+            io.close()
+
+
+if __name__ == "__main__":
+    heat2d(sys.argv)

@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import socket
+import sys
+import uuid
+from pathlib import Path
+from types import SimpleNamespace
+
+from adios_io import AdiosIO
+from socket_io import VARIABLE_PAIRS
+from socket_protocol import receive_hello, receive_message
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Receive mockProducer arrays over three TCP connections."
+    )
+    parser.add_argument("connection_file", help="rendezvous file to create")
+    parser.add_argument("output", help="ADIOS output data file/stream")
+    parser.add_argument(
+        "--engine",
+        default="BP5",
+        help="ADIOS engine (default: BP5)",
+    )
+    parser.add_argument(
+        "--bind-host",
+        default="127.0.0.1",
+        help="interface on which to listen (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--advertise-host",
+        help="host name written to the file (default: bind host)",
+    )
+    return parser.parse_args(argv)
+
+
+def create_listener(bind_host):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((bind_host, 0))
+        listener.listen(len(VARIABLE_PAIRS))
+    except Exception:
+        listener.close()
+        raise
+    return listener
+
+
+def write_connection_file(path, advertise_host, listener, session_id):
+    connection_info = {
+        "id": "socket",
+        "consumer_id": session_id,
+        "host": advertise_host,
+        "port": listener.getsockname()[1],
+    }
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(connection_info, stream, indent=2)
+        stream.write("\n")
+    os.replace(temporary, path)
+
+
+def remove_own_connection_file(path, session_id):
+    try:
+        with path.open(encoding="utf-8") as stream:
+            connection_info = json.load(stream)
+        if connection_info.get("consumer_id") == session_id:
+            path.unlink()
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
+
+
+def accept_connections(listener, session_id):
+    by_variables = {}
+    try:
+        for _ in VARIABLE_PAIRS:
+            connection, address = listener.accept()
+            pair, requested_consumer_id = receive_hello(connection)
+            if requested_consumer_id != session_id:
+                connection.close()
+                raise RuntimeError("Producer used stale socket connection information")
+            if pair not in VARIABLE_PAIRS:
+                connection.close()
+                raise RuntimeError(f"Unknown variable channel: {pair}")
+            if pair in by_variables:
+                connection.close()
+                raise RuntimeError(f"Duplicate variable channel: {pair}")
+            by_variables[pair] = connection
+            print(
+                f"Connected {'/'.join(pair)} from {address[0]}:{address[1]}",
+                flush=True,
+            )
+    except Exception:
+        for connection in by_variables.values():
+            connection.close()
+        raise
+    return [by_variables[pair] for pair in VARIABLE_PAIRS]
+
+
+def receive_steps(connections, output, engine):
+    io = None
+    step = 0
+    try:
+        while True:
+            messages = [receive_message(connection) for connection in connections]
+            if all(message is None for message in messages):
+                return
+            if any(message is None for message in messages):
+                raise RuntimeError("Socket channels ended at different times")
+
+            variables = {}
+            for pair, received in zip(VARIABLE_PAIRS, messages):
+                if set(received) != set(pair):
+                    raise RuntimeError(
+                        f"Expected {'/'.join(pair)}, received {sorted(received)}"
+                    )
+                variables.update(received)
+
+            if io is None:
+                shape = variables["d1"].shape
+                if len(shape) != 2:
+                    raise RuntimeError(f"Expected 2-D arrays, received shape {shape}")
+                settings = SimpleNamespace(
+                    destination=output,
+                    engine=engine,
+                    ndx=shape[0],
+                    ndy=shape[1],
+                )
+                io = AdiosIO(settings)
+
+            io.write_data(variables)
+            summary = ", ".join(
+                f"{name}={value.shape}/{value.dtype}"
+                for name, value in sorted(variables.items())
+            )
+            print(f"Received and wrote step {step}: {summary}", flush=True)
+            step += 1
+    finally:
+        if io is not None:
+            io.close()
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    connection_path = Path(args.connection_file)
+    advertise_host = args.advertise_host or args.bind_host
+    session_id = str(uuid.uuid4())
+    listener = create_listener(args.bind_host)
+    connections = []
+
+    try:
+        write_connection_file(
+            connection_path, advertise_host, listener, session_id
+        )
+        print(f"Connection info written to {connection_path}", flush=True)
+        connections = accept_connections(listener, session_id)
+        receive_steps(connections, args.output, args.engine)
+        print("Producer closed all socket channels", flush=True)
+    finally:
+        for connection in connections:
+            connection.close()
+        listener.close()
+        remove_own_connection_file(connection_path, session_id)
+
+
+if __name__ == "__main__":
+    main()
