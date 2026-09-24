@@ -1,0 +1,40 @@
+# Mock Producer and Socket Consumer
+
+The socket configuration uses three TCP connections through one listening port:
+`d1/d2`, `d3/d4`, and `d5/d6`. Start the consumer before the producer so it can
+create the connection-information file.
+
+## Run the socket version
+
+In the first terminal, start the consumer:
+
+```bash
+python3 mockConsumerSockets.py socket-connection.json received.bp \
+    --timing-log consumer-timing.jsonl
+```
+
+The consumer writes `socket-connection.json` when it is ready. In a second
+terminal, run the producer with a 512x512 array and 10 output steps:
+
+```bash
+python3 mockProducer.py socket-connection.json 512 512 10 \
+    --timing-log producer-timing.jsonl
+```
+
+The producer recognizes the `"id": "socket"` entry in the connection file and
+opens the three data connections. It writes the initial state immediately and
+then writes approximately every three seconds. The consumer stores the 10
+received steps in `received.bp` using ADIOS BP5.
+
+The timing logs are line-delimited JSON. The producer log records each socket
+write call, and the consumer log records the three receives, their combined
+duration, and each ADIOS write.
+
+For a consumer accepting connections from another host, specify both the bind
+address and the host name or address that the producer can reach:
+
+```bash
+python3 mockConsumerSockets.py socket-connection.json received.bp \
+    --bind-host 0.0.0.0 --advertise-host RECEIVER_HOST \
+    --timing-log consumer-timing.jsonl
+```
