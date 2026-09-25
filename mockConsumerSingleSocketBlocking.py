@@ -17,6 +17,7 @@ from mockConsumerSingleSocket import (
     remove_own_connection_file,
     write_connection_file,
 )
+from network_access import ipv4_network
 from timing_log import TimingLog, timestamp
 
 
@@ -51,6 +52,13 @@ def parse_args(argv):
     parser.add_argument("connection_file", help="rendezvous file to create")
     parser.add_argument("output", help="ADIOS output, or pickle output fallback")
     parser.add_argument("--public-key", required=True)
+    parser.add_argument(
+        "--allow-ip-range",
+        action="append",
+        required=True,
+        type=ipv4_network,
+        help="allowed producer IPv4 CIDR; may be specified more than once",
+    )
     parser.add_argument("--engine", default="BP5")
     parser.add_argument("--bind-host", default="127.0.0.1")
     parser.add_argument("--advertise-host")
@@ -157,7 +165,9 @@ def main(argv=None):
             connection_path, advertise_host, listener, session_id, public_key
         )
         print(f"Connection info written to {connection_path}", flush=True)
-        connection = accept_connection(listener, session_id, public_key)
+        connection = accept_connection(
+            listener, session_id, public_key, args.allow_ip_range
+        )
         receive_steps(
             connection,
             args.output,

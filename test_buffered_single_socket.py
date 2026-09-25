@@ -42,6 +42,8 @@ class BufferedSingleSocketIntegrationTests(unittest.TestCase):
             str(consumer_output),
             "--public-key",
             str(public_key_file),
+            "--allow-ip-range",
+            "127.0.0.1/32",
             "--timing-log",
             str(consumer_log),
             "--block-min-seconds",

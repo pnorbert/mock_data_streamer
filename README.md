@@ -12,7 +12,15 @@ python3 keygen.py generate keys/mockkey.pub keys/mockkey
 The consumers encrypt all connection information with the public key. The
 producer decrypts it with the private key, then proves possession of that key
 by answering a fresh encrypted challenge on every socket. Neither key argument
-has a default and both must be supplied explicitly.
+has a default and both must be supplied explicitly. Consumers also require at
+least one producer IPv4 range in CIDR notation. Connections outside these
+ranges are closed before key authentication or protocol parsing. Repeat
+`--allow-ip-range` to allow more than one range.
+
+This application filter runs immediately after the kernel accepts the TCP
+connection. For an Internet- or site-facing listener, enforce the same source
+range with a host firewall or infrastructure security group so unwanted TCP
+handshakes and connection floods are dropped before reaching the consumer.
 
 ## Three-socket version
 
@@ -24,6 +32,7 @@ In the first terminal, start the consumer:
 ```bash
 python3 mockConsumerSockets.py socket-connection.json received.bp \
     --public-key keys/mockkey.pub \
+    --allow-ip-range 127.0.0.1/32 \
     --timing-log consumer-timing.jsonl
 ```
 
@@ -62,6 +71,7 @@ In the first terminal, start the single-socket consumer:
 ```bash
 python3 mockConsumerSingleSocket.py single-connection.json single-received.bp \
     --public-key keys/mockkey.pub \
+    --allow-ip-range 127.0.0.1/32 \
     --timing-log single-consumer-timing.jsonl
 ```
 
@@ -82,6 +92,7 @@ seed, and maximum number of stalls are configurable. For example:
 ```bash
 python3 mockConsumerSingleSocketBlocking.py connection.json received.bp \
     --public-key keys/mockkey.pub \
+    --allow-ip-range 127.0.0.1/32 \
     --random-seed 42 --max-blocks 1
 ```
 
@@ -117,6 +128,7 @@ address and the host name or address that the producer can reach:
 ```bash
 python3 mockConsumerSockets.py socket-connection.json received.bp \
     --public-key keys/mockkey.pub \
+    --allow-ip-range PRODUCER_NETWORK/24 \
     --bind-host 0.0.0.0 --advertise-host RECEIVER_HOST \
     --timing-log consumer-timing.jsonl
 ```
