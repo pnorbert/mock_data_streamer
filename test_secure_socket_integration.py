@@ -1,4 +1,5 @@
 import json
+import socket
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,16 @@ ROOT = Path(__file__).resolve().parent
 
 
 class SecureSocketIntegrationTests(unittest.TestCase):
+    def wait_for_rendezvous(self, consumer, connection_file):
+        deadline = time.monotonic() + 10
+        while not connection_file.exists():
+            if consumer.poll() is not None:
+                consumer_text = consumer.communicate()[0]
+                self.fail(f"consumer exited before rendezvous:\n{consumer_text}")
+            if time.monotonic() >= deadline:
+                self.fail("consumer did not create its encrypted connection file")
+            time.sleep(0.02)
+
     def run_case(self, directory, consumer_script):
         private_key_file = directory / f"{consumer_script}-private.key"
         public_key_file = directory / f"{consumer_script}-public.key"
@@ -43,14 +54,7 @@ class SecureSocketIntegrationTests(unittest.TestCase):
         )
         consumer_text = ""
         try:
-            deadline = time.monotonic() + 10
-            while not connection_file.exists():
-                if consumer.poll() is not None:
-                    consumer_text = consumer.communicate()[0]
-                    self.fail(f"consumer exited before rendezvous:\n{consumer_text}")
-                if time.monotonic() >= deadline:
-                    self.fail("consumer did not create its encrypted connection file")
-                time.sleep(0.02)
+            self.wait_for_rendezvous(consumer, connection_file)
 
             serialized = connection_file.read_text(encoding="utf-8")
             envelope = json.loads(serialized)
@@ -101,6 +105,60 @@ class SecureSocketIntegrationTests(unittest.TestCase):
             ):
                 with self.subTest(consumer=consumer_script):
                     self.run_case(directory, consumer_script)
+
+    def test_consumer_reuses_exact_port_after_process_is_killed(self):
+        with tempfile.TemporaryDirectory(prefix="mockapp-port-reuse-test-") as temp:
+            directory = Path(temp)
+            private_key = nacl.public.PrivateKey.generate()
+            public_key_file = directory / "public.key"
+            public_key_file.write_bytes(bytes(private_key.public_key))
+            connection_file = directory / "connection.json"
+
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+            probe.close()
+
+            def start_consumer(generation):
+                return subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(ROOT / "mockConsumerSingleSocket.py"),
+                        str(connection_file),
+                        str(directory / "received.bp"),
+                        "--public-key",
+                        str(public_key_file),
+                        "--allow-ip-range",
+                        "127.0.0.1/32",
+                        "--port",
+                        f"{port}-{port}",
+                        "--timing-log",
+                        str(directory / f"consumer-{generation}.jsonl"),
+                    ],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+
+            first = start_consumer(1)
+            second = None
+            try:
+                self.wait_for_rendezvous(first, connection_file)
+                first.kill()
+                first.communicate(timeout=2)
+                connection_file.unlink()
+
+                second = start_consumer(2)
+                self.wait_for_rendezvous(second, connection_file)
+                self.assertIsNone(second.poll())
+            finally:
+                if first.poll() is None:
+                    first.kill()
+                    first.communicate()
+                if second is not None and second.poll() is None:
+                    second.kill()
+                    second.communicate()
 
 
 if __name__ == "__main__":

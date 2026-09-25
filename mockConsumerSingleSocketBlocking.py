@@ -17,7 +17,7 @@ from mockConsumerSingleSocket import (
     remove_own_connection_file,
     write_connection_file,
 )
-from network_access import ipv4_network
+from network_access import ipv4_network, tcp_port_range
 from timing_log import TimingLog, timestamp
 
 
@@ -61,6 +61,7 @@ def parse_args(argv):
     )
     parser.add_argument("--engine", default="BP5")
     parser.add_argument("--bind-host", default="127.0.0.1")
+    parser.add_argument("--port", type=tcp_port_range, metavar="PORT[-END]")
     parser.add_argument("--advertise-host")
     parser.add_argument(
         "--timing-log",
@@ -160,7 +161,7 @@ def main(argv=None):
     connection_file_contents = None
 
     try:
-        listener = create_listener(args.bind_host)
+        listener = create_listener(args.bind_host, args.port)
         connection_file_contents = write_connection_file(
             connection_path, advertise_host, listener, session_id, public_key
         )

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import socket
 import sys
 import time
 import uuid
@@ -12,7 +11,12 @@ from connection_security import (
     write_encrypted_connection_file,
 )
 from consumer_output import create_consumer_output
-from network_access import accept_from_allowed_network, ipv4_network
+from network_access import (
+    accept_from_allowed_network,
+    create_tcp_listener,
+    ipv4_network,
+    tcp_port_range,
+)
 from single_socket_io import VARIABLES
 from socket_protocol import (
     receive_hello,
@@ -51,6 +55,15 @@ def parse_args(argv):
         help="interface on which to listen (default: 127.0.0.1)",
     )
     parser.add_argument(
+        "--port",
+        type=tcp_port_range,
+        metavar="PORT[-END]",
+        help=(
+            "preferred listening port or bounded port range; a single occupied "
+            "port increments through 65535 (default: any available port)"
+        ),
+    )
+    parser.add_argument(
         "--advertise-host",
         help="host name written to the file (default: bind host)",
     )
@@ -62,16 +75,8 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def create_listener(bind_host):
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind((bind_host, 0))
-        listener.listen(1)
-    except Exception:
-        listener.close()
-        raise
-    return listener
+def create_listener(bind_host, ports=None):
+    return create_tcp_listener(bind_host, ports, backlog=1)
 
 
 def write_connection_file(path, advertise_host, listener, session_id, public_key):
@@ -188,7 +193,7 @@ def main(argv=None):
     connection_file_contents = None
 
     try:
-        listener = create_listener(args.bind_host)
+        listener = create_listener(args.bind_host, args.port)
         connection_file_contents = write_connection_file(
             connection_path, advertise_host, listener, session_id, public_key
         )

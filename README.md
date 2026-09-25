@@ -22,6 +22,14 @@ connection. For an Internet- or site-facing listener, enforce the same source
 range with a host firewall or infrastructure security group so unwanted TCP
 handshakes and connection floods are dropped before reaching the consumer.
 
+By default, a consumer listens on any available ephemeral port. Use
+`--port 5000` to prefer port 5000 and increment until an available port is
+found, `--port 5000-5000` to require exactly port 5000, or
+`--port 5000-5009` to restrict selection to a firewall-approved range. The
+consumer enables address reuse before binding, and the operating system closes
+its socket descriptors if the process dies, allowing the chosen port to be
+rebound immediately.
+
 ## Three-socket version
 
 This version uses three TCP connections through one listening port: `d1/d2`,
@@ -33,6 +41,7 @@ In the first terminal, start the consumer:
 python3 mockConsumerSockets.py socket-connection.json received.bp \
     --public-key keys/mockkey.pub \
     --allow-ip-range 127.0.0.1/32 \
+    --port 5000-5009 \
     --timing-log consumer-timing.jsonl
 ```
 
@@ -72,6 +81,7 @@ In the first terminal, start the single-socket consumer:
 python3 mockConsumerSingleSocket.py single-connection.json single-received.bp \
     --public-key keys/mockkey.pub \
     --allow-ip-range 127.0.0.1/32 \
+    --port 5000-5009 \
     --timing-log single-consumer-timing.jsonl
 ```
 
@@ -129,6 +139,7 @@ address and the host name or address that the producer can reach:
 python3 mockConsumerSockets.py socket-connection.json received.bp \
     --public-key keys/mockkey.pub \
     --allow-ip-range PRODUCER_NETWORK/24 \
+    --port 5000-5009 \
     --bind-host 0.0.0.0 --advertise-host RECEIVER_HOST \
     --timing-log consumer-timing.jsonl
 ```
