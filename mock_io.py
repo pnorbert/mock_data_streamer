@@ -14,6 +14,26 @@ class IO(ABC):
     @classmethod
     def create(cls, settings, timing_log=None):
         private_key = load_private_key(settings.private_key)
+        from remote_consumer_io import ServerConfig
+
+        if (
+            Path(settings.destination).suffix.lower() == ".conf"
+            or ServerConfig.is_server_config(settings.destination)
+        ):
+            from remote_consumer_io import RestartingSingleSocketIO
+
+            output = RestartingSingleSocketIO(
+                settings, private_key, timing_log=timing_log
+            )
+            return BufferedIO(
+                output,
+                buffer_seconds=getattr(settings, "buffer_seconds", 600.0),
+                output_interval_seconds=getattr(
+                    settings, "output_interval_seconds", 3.0
+                ),
+                timing_log=timing_log,
+            )
+
         connection_info = cls._read_connection_info(settings.destination, private_key)
         io_id = connection_info.get("id", "adios") if connection_info else "adios"
 

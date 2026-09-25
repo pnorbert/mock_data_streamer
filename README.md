@@ -1,9 +1,10 @@
 # Mock Producer and Socket Consumers
 
-Start the selected consumer before the producer so it can create the
-connection-information file. The file's `id` selects the producer's I/O
-implementation. Generate a Curve25519 keypair once and keep the private key
-with the producer:
+For a manually launched consumer, start it before the producer so it can create
+the connection-information file. The file's `id` selects the producer's I/O
+implementation. A producer can instead receive a `server.conf` file and launch
+a single-socket consumer through SSH as described below. Generate a Curve25519
+keypair once and keep the private key with the producer:
 
 ```bash
 python3 keygen.py generate keys/mockkey.pub keys/mockkey
@@ -92,6 +93,73 @@ python3 mockProducer.py single-connection.json 512 512 10 \
     --private-key keys/mockkey \
     --timing-log single-producer-timing.jsonl
 ```
+
+The single-socket consumer acknowledges each step after its output write
+finishes. This lets a producer with a socket timeout distinguish a completed
+step from a stalled consumer or a connection that failed during transfer. The
+connection information advertises protocol version 2, and the producer rejects
+older single-socket rendezvous files that cannot provide acknowledgements. The
+producer and consumer must therefore be upgraded together.
+
+## Launching and recovering a consumer through SSH
+
+Pass a configuration file containing a `[server]` section as the producer's
+destination. The checked-in `server.conf` is configured for `ubuntupc`:
+
+```ini
+[server]
+host = ubuntupc
+working_directory = /home/pnorbert/Software/LAPD/mock_data_streamer
+python = /home/pnorbert/Software/LAPD/.venv/bin/python3
+script = mockConsumerSingleSocket.py
+connection_file = conn.json
+output = out.bp
+stdout_log = mockConsumerSingleSocket.stdout.log
+pid_file = mockConsumerSingleSocket.pid
+public_key = keys/mockkey.pub
+allow_ip_range = 192.168.1.0/24
+port = 8501-8501
+bind_host = 0.0.0.0
+advertise_host = 192.168.1.7
+socket_timeout_seconds = 30
+startup_timeout_seconds = 30
+retry_delay_seconds = 1
+max_relaunch_attempts = 0
+```
+
+The SSH client must already be able to authenticate non-interactively. Paths
+other than `working_directory` are interpreted on the remote host. Multiple
+allowed networks can be written as a comma-separated list. `ssh_command` may
+be set when SSH options or a different executable are needed.
+
+Start the producer normally, using the configuration as its destination:
+
+```bash
+python3 mockProducer.py server.conf 512 512 10 \
+    --private-key keys/mockkey \
+    --buffer-seconds 600 \
+    --timing-log producer-timing.jsonl
+```
+
+The remote command removes stale rendezvous information, stops the process
+recorded in `pid_file`, and starts the consumer with `nohup`. Its stdin is
+`/dev/null`, and both stdout and stderr are appended to `stdout_log`. Once the
+new encrypted connection information is printed back to the producer, the SSH
+session exits; the consumer no longer depends on that session.
+
+`socket_timeout_seconds` bounds every socket operation, including the
+per-step acknowledgement. If the consumer stalls past that timeout or the TCP
+connection breaks, the producer closes the failed channel, launches a new
+consumer, and retries only the interrupted in-flight snapshot. Snapshots that
+were already acknowledged are not resent. The existing buffered-output queue
+then drains its unsent snapshots in FIFO order before sending newer steps; the
+simulation is never recomputed. The first consumer creates a fresh output; a
+replacement consumer opens that output in append mode so acknowledged steps
+remain present exactly once. A zero `max_relaunch_attempts` retries
+indefinitely; a positive value limits each series of SSH launch attempts.
+Relaunch and retry activity is recorded as `consumer.connection_lost`,
+`consumer.launch`, `consumer.launch_retry`, and `io.retry` events in the
+producer timing log.
 
 ### Deliberately blocking test consumer
 

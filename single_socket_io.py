@@ -1,16 +1,28 @@
 import socket
 
 from mock_io import IO
-from socket_protocol import prove_private_key, send_arrays, send_end, send_hello
+from socket_protocol import (
+    prove_private_key,
+    receive_ack,
+    send_arrays,
+    send_end,
+    send_hello,
+)
 
 
 VARIABLES = ("d1", "d2", "d3", "d4", "d5", "d6")
+PROTOCOL_VERSION = 2
 
 
 class SingleSocketIO(IO):
     def __init__(self, settings, connection_info, private_key):
-        del settings
         self._socket = None
+        version = connection_info.get("protocol_version")
+        if version != PROTOCOL_VERSION:
+            raise ValueError(
+                "Single-socket connection information uses unsupported "
+                f"protocol version {version!r}; expected {PROTOCOL_VERSION}"
+            )
         host = connection_info.get("host")
         if not isinstance(host, str) or not host:
             raise ValueError("Single-socket connection info has no valid host")
@@ -21,7 +33,8 @@ class SingleSocketIO(IO):
         if not isinstance(consumer_id, str) or not consumer_id:
             raise ValueError("Single-socket connection info has no valid consumer_id")
 
-        connection = socket.create_connection((host, port))
+        timeout = getattr(settings, "socket_timeout_seconds", None)
+        connection = socket.create_connection((host, port), timeout=timeout)
         try:
             connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             prove_private_key(connection, private_key)
@@ -33,6 +46,7 @@ class SingleSocketIO(IO):
 
     def write_data(self, data):
         send_arrays(self._socket, [(name, data[name]) for name in VARIABLES])
+        receive_ack(self._socket)
 
     def close(self):
         if self._socket is not None:
@@ -40,5 +54,10 @@ class SingleSocketIO(IO):
                 send_end(self._socket)
             except OSError:
                 pass
+            self.abort()
+
+    def abort(self):
+        """Close a failed channel without attempting a protocol shutdown."""
+        if self._socket is not None:
             self._socket.close()
             self._socket = None

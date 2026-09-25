@@ -5,12 +5,13 @@ from adios_io import ADIOS2_AVAILABLE, AdiosIO
 from pickle_io import PickleIO
 
 
-def create_consumer_output(output, engine, shape):
+def create_consumer_output(output, engine, shape, append=False):
     settings = SimpleNamespace(
         destination=output,
         engine=engine,
         ndx=shape[0],
         ndy=shape[1],
+        append_output=append,
     )
     if ADIOS2_AVAILABLE:
         return AdiosIO(settings)

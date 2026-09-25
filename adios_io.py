@@ -37,7 +37,8 @@ class AdiosIO(IO):
 
         self._io.define_attribute("description", "Temperature from simulation", "T1")
         self._io.define_attribute("unit", "C", "T1")
-        self._stream = adios2.Stream(self._io, output, "w")
+        mode = "a" if getattr(settings, "append_output", False) else "w"
+        self._stream = adios2.Stream(self._io, output, mode)
         self._stream.engine.lock_writer_definitions()
 
     def write_data(self, data):

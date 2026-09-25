@@ -16,7 +16,7 @@ def print_usage():
     print(
         "Usage: mockProducer.py destination nx ny steps [engine] "
         "--private-key FILE [--timing-log FILE] [--buffer-seconds SECONDS]\n"
-        "  destination: ADIOS output or a socket connection-info file\n"
+        "  destination: ADIOS output, socket connection-info, or server.conf\n"
         "  nx:     local array size in X dimension per processor\n"
         "  ny:     local array size in Y dimension per processor\n"
         "  steps:  the total number of steps to output\n"

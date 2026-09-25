@@ -1,4 +1,5 @@
 import json
+import threading
 from datetime import datetime
 
 
@@ -11,6 +12,7 @@ class TimingLog:
 
     def __init__(self, path):
         self._stream = open(path, "a", encoding="utf-8", buffering=1)
+        self._lock = threading.Lock()
 
     def record(self, event, **fields):
         record = {
@@ -18,10 +20,12 @@ class TimingLog:
             "event": event,
             **fields,
         }
-        json.dump(record, self._stream, separators=(",", ":"))
-        self._stream.write("\n")
+        with self._lock:
+            json.dump(record, self._stream, separators=(",", ":"))
+            self._stream.write("\n")
 
     def close(self):
-        if self._stream is not None:
-            self._stream.close()
-            self._stream = None
+        with self._lock:
+            if self._stream is not None:
+                self._stream.close()
+                self._stream = None

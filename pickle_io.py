@@ -9,7 +9,8 @@ class PickleIO(IO):
     def __init__(self, settings, connection_info=None):
         connection_info = connection_info or {}
         output = connection_info.get("output", settings.destination)
-        self._stream = open(output, "wb")
+        mode = "ab" if getattr(settings, "append_output", False) else "wb"
+        self._stream = open(output, mode)
 
     def write_data(self, data):
         pickle.dump(data, self._stream, protocol=pickle.HIGHEST_PROTOCOL)

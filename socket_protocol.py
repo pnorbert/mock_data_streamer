@@ -102,6 +102,18 @@ def send_end(sock):
     _send_header(sock, {"type": "end"})
 
 
+def send_ack(sock):
+    """Confirm that one complete data message was written by the consumer."""
+    _send_header(sock, {"type": "ack"})
+
+
+def receive_ack(sock):
+    """Wait until the consumer confirms one complete data message."""
+    header = _receive_header(sock)
+    if header.get("type") != "ack":
+        raise RuntimeError(f"Expected socket acknowledgement, got: {header.get('type')}")
+
+
 def _recv_exact(sock, size):
     data = bytearray(size)
     view = memoryview(data)

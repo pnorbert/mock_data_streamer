@@ -1,0 +1,362 @@
+"""Launch and reconnect a single-socket consumer through SSH."""
+
+import configparser
+import json
+import math
+import shlex
+import subprocess
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+from connection_security import decrypt_connection_info
+from mock_io import IO
+from single_socket_io import SingleSocketIO
+
+
+class ServerConfig:
+    """Validated values from a ``server.conf`` rendezvous file."""
+
+    SECTION_NAMES = ("server", "consumer")
+
+    def __init__(self, path):
+        self.path = Path(path)
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            with self.path.open(encoding="utf-8") as stream:
+                parser.read_file(stream)
+        except (OSError, configparser.Error) as exc:
+            raise ValueError(
+                f"Unable to read server configuration {path}: {exc}"
+            ) from exc
+
+        section_name = next(
+            (name for name in self.SECTION_NAMES if parser.has_section(name)), None
+        )
+        if section_name is None:
+            raise ValueError(
+                f"Server configuration {path} needs a [server] section"
+            )
+        values = parser[section_name]
+
+        self.host = self._required(values, "host")
+        self.working_directory = self._required(values, "working_directory")
+        self.python = values.get("python", "python3").strip()
+        self.script = values.get("script", "mockConsumerSingleSocket.py").strip()
+        self.connection_file = values.get("connection_file", "conn.json").strip()
+        self.output = values.get("output", "out.bp").strip()
+        self.public_key = self._required(values, "public_key")
+        self.allow_ip_ranges = tuple(
+            item.strip()
+            for item in values.get("allow_ip_range", "").split(",")
+            if item.strip()
+        )
+        if not self.allow_ip_ranges:
+            raise ValueError("server allow_ip_range must contain at least one CIDR")
+
+        self.port = values.get("port", fallback=None)
+        self.bind_host = values.get("bind_host", fallback=None)
+        self.advertise_host = values.get("advertise_host", fallback=None)
+        self.engine = values.get("engine", fallback=None)
+        self.timing_log = values.get("timing_log", fallback=None)
+        self.stdout_log = values.get(
+            "stdout_log", "mockConsumerSingleSocket.stdout.log"
+        ).strip()
+        self.pid_file = values.get(
+            "pid_file", "mockConsumerSingleSocket.pid"
+        ).strip()
+        self.ssh_command = shlex.split(values.get("ssh_command", "ssh"))
+        if not self.ssh_command:
+            raise ValueError("server ssh_command must not be empty")
+        self.startup_timeout_seconds = self._positive_float(
+            values, "startup_timeout_seconds", 30.0
+        )
+        self.socket_timeout_seconds = self._positive_float(
+            values, "socket_timeout_seconds", 30.0
+        )
+        self.retry_delay_seconds = self._nonnegative_float(
+            values, "retry_delay_seconds", 1.0
+        )
+        self.max_relaunch_attempts = self._nonnegative_int(
+            values, "max_relaunch_attempts", 0
+        )
+
+        for name in (
+            "python",
+            "script",
+            "connection_file",
+            "output",
+            "stdout_log",
+            "pid_file",
+        ):
+            if not getattr(self, name):
+                raise ValueError(f"server {name} must not be empty")
+
+    @staticmethod
+    def is_server_config(path):
+        path = Path(path)
+        if not path.is_file():
+            return False
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            with path.open(encoding="utf-8") as stream:
+                parser.read_file(stream)
+        except (OSError, UnicodeDecodeError, configparser.Error):
+            return False
+        return any(parser.has_section(name) for name in ServerConfig.SECTION_NAMES)
+
+    @staticmethod
+    def _required(values, name):
+        value = values.get(name, "").strip()
+        if not value:
+            raise ValueError(f"server {name} is required")
+        return value
+
+    @staticmethod
+    def _positive_float(values, name, default):
+        try:
+            value = values.getfloat(name, fallback=default)
+        except ValueError as exc:
+            raise ValueError(f"server {name} must be a number") from exc
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"server {name} must be greater than zero")
+        return value
+
+    @staticmethod
+    def _nonnegative_float(values, name, default):
+        try:
+            value = values.getfloat(name, fallback=default)
+        except ValueError as exc:
+            raise ValueError(f"server {name} must be a number") from exc
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"server {name} must not be negative")
+        return value
+
+    @staticmethod
+    def _nonnegative_int(values, name, default):
+        try:
+            value = values.getint(name, fallback=default)
+        except ValueError as exc:
+            raise ValueError(f"server {name} must be an integer") from exc
+        if value < 0:
+            raise ValueError(f"server {name} must not be negative")
+        return value
+
+
+class SSHConsumerLauncher:
+    """Start a detached remote process and return its encrypted rendezvous."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def launch(self, append_output=False):
+        command = self._remote_command(append_output=append_output)
+        try:
+            completed = subprocess.run(
+                [*self.config.ssh_command, self.config.host, command],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=self.config.startup_timeout_seconds + 5.0,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OSError(
+                f"Unable to launch consumer on {self.config.host}: {exc}"
+            ) from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise OSError(
+                f"Consumer launch on {self.config.host} failed"
+                + (f": {detail}" if detail else "")
+            )
+        try:
+            envelope = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise OSError(
+                f"Consumer launch on {self.config.host} returned invalid "
+                "connection information"
+            ) from exc
+        return envelope
+
+    def _consumer_arguments(self, append_output=False):
+        cfg = self.config
+        arguments = [
+            cfg.python,
+            cfg.script,
+            "--public-key",
+            cfg.public_key,
+        ]
+        for network in cfg.allow_ip_ranges:
+            arguments.extend(("--allow-ip-range", network))
+        for option, value in (
+            ("--port", cfg.port),
+            ("--bind-host", cfg.bind_host),
+            ("--advertise-host", cfg.advertise_host),
+            ("--engine", cfg.engine),
+            ("--timing-log", cfg.timing_log),
+        ):
+            if value:
+                arguments.extend((option, value))
+        if append_output:
+            arguments.append("--append-output")
+        arguments.extend((cfg.connection_file, cfg.output))
+        return arguments
+
+    def _remote_command(self, append_output=False):
+        cfg = self.config
+        quote = shlex.quote
+        workdir = quote(cfg.working_directory)
+        pid_file = quote(cfg.pid_file)
+        connection_file = quote(cfg.connection_file)
+        stdout_log = quote(cfg.stdout_log)
+        script = quote(cfg.script)
+        consumer = " ".join(
+            quote(item)
+            for item in self._consumer_arguments(append_output=append_output)
+        )
+        polls = max(1, math.ceil(cfg.startup_timeout_seconds * 10))
+        # All consumer descriptors are redirected before the SSH shell exits.
+        # nohup makes the process independent of the SSH session's SIGHUP.
+        return "\n".join(
+            (
+                "set -eu",
+                f"cd {workdir}",
+                f"if [ -f {pid_file} ]; then",
+                f"  old_pid=$(cat {pid_file})",
+                '  case "$old_pid" in',
+                '    *[!0-9]*|"") ;;',
+                "    *)",
+                '      if tr \'\\000\' \'\\n\' < "/proc/$old_pid/cmdline" 2>/dev/null '
+                f"| grep -Fx -- {script} >/dev/null 2>&1; then",
+                '        kill "$old_pid" 2>/dev/null || true',
+                "        stop_i=0",
+                '        while kill -0 "$old_pid" 2>/dev/null '
+                '&& [ "$stop_i" -lt 20 ]; do',
+                "          sleep 0.1",
+                "          stop_i=$((stop_i + 1))",
+                "        done",
+                '        kill -KILL "$old_pid" 2>/dev/null || true',
+                "      fi",
+                "      ;;",
+                "  esac",
+                "fi",
+                f"rm -f {connection_file}",
+                f"nohup {consumer} >> {stdout_log} 2>&1 < /dev/null &",
+                "consumer_pid=$!",
+                f"printf '%s\\n' \"$consumer_pid\" > {pid_file}",
+                "i=0",
+                f'while [ "$i" -lt {polls} ]; do',
+                f"  if [ -s {connection_file} ]; then cat {connection_file}; exit 0; fi",
+                '  if ! kill -0 "$consumer_pid" 2>/dev/null; then',
+                f"    tail -n 20 {stdout_log} >&2 || true",
+                "    exit 1",
+                "  fi",
+                "  sleep 0.1",
+                "  i=$((i + 1))",
+                "done",
+                'kill "$consumer_pid" 2>/dev/null || true',
+                'echo "consumer did not create its connection file in time" >&2',
+                "exit 1",
+            )
+        )
+
+
+class RestartingSingleSocketIO(IO):
+    """Reconnect a remote consumer and retry only the interrupted output."""
+
+    def __init__(
+        self,
+        settings,
+        private_key,
+        config=None,
+        launcher=None,
+        timing_log=None,
+    ):
+        self._timing_log = timing_log
+        self._private_key = private_key
+        self._config = config or ServerConfig(settings.destination)
+        self._launcher = launcher or SSHConsumerLauncher(self._config)
+        self._output = None
+        self._closed = False
+        self._connect_with_retries("launch")
+
+    def _new_output(self, append_output=False):
+        envelope = self._launcher.launch(append_output=append_output)
+        connection_info = decrypt_connection_info(envelope, self._private_key)
+        if connection_info.get("id") != "singlesocket":
+            raise ValueError("Remote consumer must use the singlesocket protocol")
+        socket_settings = SimpleNamespace(
+            socket_timeout_seconds=self._config.socket_timeout_seconds
+        )
+        return SingleSocketIO(socket_settings, connection_info, self._private_key)
+
+    def _connect_with_retries(self, reason):
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                self._output = self._new_output(
+                    append_output=reason == "connection_lost"
+                )
+                self._record(
+                    "consumer.launch",
+                    reason=reason,
+                    attempt=attempt,
+                    host=self._config.host,
+                )
+                return
+            except (OSError, EOFError, RuntimeError):
+                maximum = self._config.max_relaunch_attempts
+                if maximum and attempt >= maximum:
+                    raise
+                self._record(
+                    "consumer.launch_retry",
+                    reason=reason,
+                    attempt=attempt,
+                    host=self._config.host,
+                )
+                if self._config.retry_delay_seconds:
+                    time.sleep(self._config.retry_delay_seconds)
+
+    def write_data(self, data):
+        if self._closed:
+            raise RuntimeError("Cannot write to closed output")
+        try:
+            self._output.write_data(data)
+        except (OSError, EOFError, RuntimeError) as exc:
+            self._relaunch_and_retry(data, exc)
+
+    def _relaunch_and_retry(self, data, failure):
+        while True:
+            self._record(
+                "consumer.connection_lost",
+                error_type=type(failure).__name__,
+            )
+            self._discard_output(graceful=False)
+            self._connect_with_retries("connection_lost")
+            try:
+                self._output.write_data(data)
+                self._record("io.retry")
+                return
+            except (OSError, EOFError, RuntimeError) as exc:
+                failure = exc
+
+    def _record(self, event, **fields):
+        if self._timing_log is not None:
+            self._timing_log.record(event, **fields)
+
+    def _discard_output(self, graceful=True):
+        if self._output is not None:
+            if graceful:
+                self._output.close()
+            else:
+                self._output.abort()
+            self._output = None
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._discard_output()

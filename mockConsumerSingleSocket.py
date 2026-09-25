@@ -17,10 +17,11 @@ from network_access import (
     ipv4_network,
     tcp_port_range,
 )
-from single_socket_io import VARIABLES
+from single_socket_io import PROTOCOL_VERSION, VARIABLES
 from socket_protocol import (
     receive_hello,
     receive_message,
+    send_ack,
     verify_producer_private_key,
 )
 from timing_log import TimingLog, timestamp
@@ -72,6 +73,11 @@ def parse_args(argv):
         default="mockConsumerSingleSocket.log",
         help="timing log file (default: mockConsumerSingleSocket.log)",
     )
+    parser.add_argument(
+        "--append-output",
+        action="store_true",
+        help="append steps to an output created by an earlier consumer",
+    )
     return parser.parse_args(argv)
 
 
@@ -82,6 +88,7 @@ def create_listener(bind_host, ports=None):
 def write_connection_file(path, advertise_host, listener, session_id, public_key):
     connection_info = {
         "id": "singlesocket",
+        "protocol_version": PROTOCOL_VERSION,
         "consumer_id": session_id,
         "host": advertise_host,
         "port": listener.getsockname()[1],
@@ -114,7 +121,14 @@ def accept_connection(listener, session_id, public_key, allowed_networks):
     return connection
 
 
-def receive_steps(connection, output, engine, timing_log, before_receive=None):
+def receive_steps(
+    connection,
+    output,
+    engine,
+    timing_log,
+    before_receive=None,
+    append_output=False,
+):
     io = None
     step = 0
     try:
@@ -147,7 +161,9 @@ def receive_steps(connection, output, engine, timing_log, before_receive=None):
                 shape = variables["d1"].shape
                 if len(shape) != 2:
                     raise RuntimeError(f"Expected 2-D arrays, received shape {shape}")
-                io = create_consumer_output(output, engine, shape)
+                io = create_consumer_output(
+                    output, engine, shape, append=append_output
+                )
 
             write_called_at = timestamp()
             write_start = time.perf_counter()
@@ -170,6 +186,7 @@ def receive_steps(connection, output, engine, timing_log, before_receive=None):
                 duration_seconds=time.perf_counter() - write_start,
                 status="ok",
             )
+            send_ack(connection)
             summary = ", ".join(
                 f"{name}={value.shape}/{value.dtype}"
                 for name, value in sorted(variables.items())
@@ -201,7 +218,13 @@ def main(argv=None):
         connection = accept_connection(
             listener, session_id, public_key, args.allow_ip_range
         )
-        receive_steps(connection, args.output, args.engine, timing_log)
+        receive_steps(
+            connection,
+            args.output,
+            args.engine,
+            timing_log,
+            append_output=args.append_output,
+        )
         print("Producer closed the socket channel", flush=True)
     finally:
         if connection is not None:

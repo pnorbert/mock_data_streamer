@@ -67,6 +67,7 @@ def parse_args(argv):
         "--timing-log",
         default="mockConsumerSingleSocketBlocking.log",
     )
+    parser.add_argument("--append-output", action="store_true")
     parser.add_argument(
         "--block-min-seconds",
         type=positive_float,
@@ -175,6 +176,7 @@ def main(argv=None):
             args.engine,
             timing_log,
             before_receive=blocker,
+            append_output=args.append_output,
         )
         print("Producer closed the socket channel", flush=True)
     finally:
