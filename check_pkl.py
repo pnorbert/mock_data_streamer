@@ -44,9 +44,12 @@ def main():
             print(f"  keys: {list(variables)}")
             print("  arrays:")
             for name, value in variables.items():
-                length = len(value)
-                size = getattr(value, "size", length)
+                size = getattr(value, "size", 1)
                 shape = getattr(value, "shape", None)
+                if shape == ():
+                    print(f"    {name}: value={value.item()}, scalar")
+                    continue
+                length = len(value)
                 print(f"    {name}: len={length}, size={size}, shape={shape}")
             step += 1
 

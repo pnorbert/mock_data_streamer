@@ -79,7 +79,9 @@ def send_arrays(sock, variables):
     arrays = []
     descriptions = []
     for name, value in variables:
-        array = np.ascontiguousarray(value)
+        array = np.asarray(value)
+        if not array.flags.c_contiguous:
+            array = np.ascontiguousarray(array)
         arrays.append(array)
         descriptions.append(
             {

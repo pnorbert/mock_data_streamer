@@ -34,6 +34,9 @@ class AdiosIO(IO):
                 ("d1", "d2", "d3", "d4", "d5", "d6"), start=1
             )
         }
+        self._variables["iteration"] = self._io.define_variable(
+            "iteration", np.array(0, dtype=np.int64)
+        )
 
         self._io.define_attribute("description", "Temperature from simulation", "T1")
         self._io.define_attribute("unit", "C", "T1")

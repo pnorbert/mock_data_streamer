@@ -10,8 +10,8 @@ from socket_protocol import (
 )
 
 
-VARIABLES = ("d1", "d2", "d3", "d4", "d5", "d6")
-PROTOCOL_VERSION = 2
+VARIABLES = ("iteration", "d1", "d2", "d3", "d4", "d5", "d6")
+PROTOCOL_VERSION = 3
 
 
 class SingleSocketIO(IO):

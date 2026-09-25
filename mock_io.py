@@ -5,6 +5,8 @@ from collections import deque
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+import numpy as np
+
 from connection_security import decrypt_connection_info, load_private_key
 
 
@@ -82,12 +84,16 @@ class IO(ABC):
         return decrypt_connection_info(connection_info, private_key)
 
     @staticmethod
-    def data_variables(ht):
-        return IO.data_variables_from_d1(ht.data_noghost())
+    def data_variables(ht, step=None):
+        return IO.data_variables_from_d1(ht.data_noghost(), step=step)
 
     @staticmethod
-    def data_variables_from_d1(d1):
+    def data_variables_from_d1(d1, step=None):
         return {
+            "iteration": np.array(
+                -1 if step is None else step,
+                dtype=np.int64,
+            ),
             "d1": d1,
             "d2": d1 / 2.0,
             "d3": d1 * 1.5,
@@ -97,8 +103,7 @@ class IO(ABC):
         }
 
     def write(self, ht, step=None):
-        del step
-        self.write_data(self.data_variables(ht))
+        self.write_data(self.data_variables(ht, step=step))
 
     @abstractmethod
     def write_data(self, data):
@@ -206,7 +211,7 @@ class BufferedIO(IO):
                     elif self._next_drop_index > 0:
                         self._next_drop_index -= 1
                 if is_heat_snapshot:
-                    data = self.data_variables_from_d1(data)
+                    data = self.data_variables_from_d1(data, step=_step)
                 self._output.write_data(data)
         except BaseException as exc:
             with self._condition:

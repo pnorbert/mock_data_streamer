@@ -60,7 +60,7 @@ class BufferedIOTests(unittest.TestCase):
         io = BufferedIO(output, buffer_seconds=6, output_interval_seconds=3)
         heat = HeatData(np.array([[2.0]]))
 
-        io.write(heat)
+        io.write(heat, step=7)
         self.assertTrue(output.started.wait(timeout=1))
         heat.data[0, 0] = 100.0
         gate.set()
@@ -68,6 +68,7 @@ class BufferedIOTests(unittest.TestCase):
 
         self.assertEqual(output.values[0]["d1"][0, 0], 2.0)
         self.assertEqual(output.values[0]["d2"][0, 0], 1.0)
+        self.assertEqual(output.values[0]["iteration"].item(), 7)
 
     def test_full_buffer_drops_one_pending_step_per_new_step(self):
         gate = threading.Event()

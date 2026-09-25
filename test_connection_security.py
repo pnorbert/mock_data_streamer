@@ -7,6 +7,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 import nacl.public
+import numpy as np
 
 from connection_security import (
     CONNECTION_FILE_FORMAT,
@@ -16,7 +17,12 @@ from connection_security import (
 from mockConsumerSingleSocket import parse_args as parse_single_consumer_args
 from mockConsumerSockets import parse_args as parse_consumer_args
 from mockProducer import Settings
-from socket_protocol import prove_private_key, verify_producer_private_key
+from socket_protocol import (
+    prove_private_key,
+    receive_message,
+    send_arrays,
+    verify_producer_private_key,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -107,6 +113,21 @@ class ConnectionSecurityTests(unittest.TestCase):
                 with redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit):
                         parse_args(["connection.json", "output.bp"])
+
+    def test_socket_protocol_preserves_scalar_shape(self):
+        consumer, producer = socket.socketpair()
+        try:
+            send_arrays(
+                producer,
+                [("iteration", np.array(42, dtype=np.int64))],
+            )
+            variables = receive_message(consumer)
+        finally:
+            producer.close()
+            consumer.close()
+
+        self.assertEqual(variables["iteration"].shape, ())
+        self.assertEqual(variables["iteration"].item(), 42)
 
 
 if __name__ == "__main__":

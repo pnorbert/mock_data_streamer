@@ -91,7 +91,7 @@ class RemoteConsumerTests(unittest.TestCase):
         private_key = nacl.public.PrivateKey.generate()
         connection_info = {
             "id": "singlesocket",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "consumer_id": "session",
             "host": "127.0.0.1",
             "port": 8501,
@@ -129,7 +129,7 @@ class RemoteConsumerTests(unittest.TestCase):
             )
             steps = [
                 RestartingSingleSocketIO.data_variables_from_d1(
-                    np.array([[float(value)]])
+                    np.array([[float(value)]]), step=value
                 )
                 for value in range(4)
             ]
@@ -145,12 +145,13 @@ class RemoteConsumerTests(unittest.TestCase):
         second.write_data.assert_called_once()
         retried = second.write_data.call_args.args[0]
         np.testing.assert_array_equal(retried["d1"], steps[3]["d1"])
+        self.assertEqual(retried["iteration"].item(), 3)
 
     def test_retried_in_flight_step_precedes_buffered_steps(self):
         private_key = nacl.public.PrivateKey.generate()
         connection_info = {
             "id": "singlesocket",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "consumer_id": "session",
             "host": "127.0.0.1",
             "port": 8501,
@@ -182,7 +183,7 @@ class RemoteConsumerTests(unittest.TestCase):
         first.write_data.side_effect = write_then_fail
         steps = [
             RestartingSingleSocketIO.data_variables_from_d1(
-                np.array([[float(step)]])
+                np.array([[float(step)]]), step=step
             )
             for step in range(10, 17)
         ]
@@ -209,6 +210,11 @@ class RemoteConsumerTests(unittest.TestCase):
             for call in second.write_data.call_args_list
         ]
         self.assertEqual(sent_after_relaunch, [11, 12, 13, 14, 15, 16])
+        sent_iterations = [
+            call.args[0]["iteration"].item()
+            for call in second.write_data.call_args_list
+        ]
+        self.assertEqual(sent_iterations, [11, 12, 13, 14, 15, 16])
 
     def test_pickle_output_appends_after_consumer_restart(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -33,8 +33,8 @@ rebound immediately.
 
 ## Three-socket version
 
-This version uses three TCP connections through one listening port: `d1/d2`,
-`d3/d4`, and `d5/d6`. Its connection ID is `sockets`.
+This version uses three TCP connections through one listening port:
+`iteration/d1/d2`, `d3/d4`, and `d5/d6`. Its connection ID is `sockets`.
 
 In the first terminal, start the consumer:
 
@@ -73,8 +73,8 @@ receives, their combined duration, and each output write.
 
 ## Single-socket version
 
-This version sends all six variables through one TCP connection. Its connection
-ID is `singlesocket`.
+This version sends the scalar `iteration` value and all six arrays through one
+TCP connection. Its connection ID is `singlesocket`.
 
 In the first terminal, start the single-socket consumer:
 
@@ -97,7 +97,7 @@ python3 mockProducer.py single-connection.json 512 512 10 \
 The single-socket consumer acknowledges each step after its output write
 finishes. This lets a producer with a socket timeout distinguish a completed
 step from a stalled consumer or a connection that failed during transfer. The
-connection information advertises protocol version 2, and the producer rejects
+connection information advertises protocol version 3, and the producer rejects
 older single-socket rendezvous files that cannot provide acknowledgements. The
 producer and consumer must therefore be upgraded together.
 
@@ -186,7 +186,8 @@ MOCKAPP_RUN_SOCKET_INTEGRATION=1 \
 The consumers do not require the `adios2` Python module. When it is unavailable,
 an output argument such as `received.bp` is automatically changed to
 `received.pkl`. The pickle file contains one dictionary per received step, with
-keys `d1` through `d6`. Read all steps from the pickle stream with:
+the scalar `iteration` and array keys `d1` through `d6`. Read all steps from the
+pickle stream with:
 
 ```python
 import pickle

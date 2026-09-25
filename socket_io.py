@@ -4,7 +4,11 @@ from mock_io import IO
 from socket_protocol import prove_private_key, send_arrays, send_end, send_hello
 
 
-VARIABLE_PAIRS = (("d1", "d2"), ("d3", "d4"), ("d5", "d6"))
+VARIABLE_PAIRS = (
+    ("iteration", "d1", "d2"),
+    ("d3", "d4"),
+    ("d5", "d6"),
+)
 
 
 class SocketIO(IO):
