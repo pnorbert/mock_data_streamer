@@ -1,12 +1,18 @@
+import base64
+import hmac
 import json
 import math
+import secrets
 import struct
 
+import nacl.exceptions
+import nacl.public
 import numpy as np
 
 
 _HEADER_LENGTH = struct.Struct("!Q")
 _MAX_HEADER_BYTES = 1024 * 1024
+_AUTH_CHALLENGE_BYTES = 32
 
 
 def _send_header(sock, header):
@@ -22,6 +28,49 @@ def send_hello(sock, variables, consumer_id):
             "type": "hello",
             "variables": list(variables),
             "consumer_id": consumer_id,
+        },
+    )
+
+
+def verify_producer_private_key(sock, public_key):
+    """Challenge the peer to prove possession of the matching private key."""
+    challenge = secrets.token_bytes(_AUTH_CHALLENGE_BYTES)
+    encrypted = nacl.public.SealedBox(public_key).encrypt(challenge)
+    _send_header(
+        sock,
+        {
+            "type": "auth_challenge",
+            "challenge": base64.b64encode(encrypted).decode("ascii"),
+        },
+    )
+    response = _receive_header(sock)
+    if response.get("type") != "auth_response":
+        raise RuntimeError("Producer did not answer the private-key challenge")
+    try:
+        answer = base64.b64decode(response["response"], validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Producer returned an invalid private-key response") from exc
+    if not hmac.compare_digest(answer, challenge):
+        raise RuntimeError("Producer failed private-key authentication")
+
+
+def prove_private_key(sock, private_key):
+    """Answer a consumer challenge using a Curve25519 private key."""
+    request = _receive_header(sock)
+    if request.get("type") != "auth_challenge":
+        raise RuntimeError("Consumer did not send a private-key challenge")
+    try:
+        encrypted = base64.b64decode(request["challenge"], validate=True)
+        challenge = nacl.public.SealedBox(private_key).decrypt(encrypted)
+    except (KeyError, TypeError, ValueError, nacl.exceptions.CryptoError) as exc:
+        raise RuntimeError("Unable to answer consumer private-key challenge") from exc
+    if len(challenge) != _AUTH_CHALLENGE_BYTES:
+        raise RuntimeError("Consumer sent an invalid private-key challenge")
+    _send_header(
+        sock,
+        {
+            "type": "auth_response",
+            "response": base64.b64encode(challenge).decode("ascii"),
         },
     )
 

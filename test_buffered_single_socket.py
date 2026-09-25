@@ -7,6 +7,8 @@ import time
 import unittest
 from pathlib import Path
 
+import nacl.public
+
 
 RUN_INTEGRATION = os.environ.get("MOCKAPP_RUN_SOCKET_INTEGRATION") == "1"
 ROOT = Path(__file__).resolve().parent
@@ -23,6 +25,11 @@ def read_json_lines(path):
 )
 class BufferedSingleSocketIntegrationTests(unittest.TestCase):
     def run_case(self, directory, name, buffer_seconds, expected_drop_count):
+        private_key_file = directory / f"{name}-private.key"
+        public_key_file = directory / f"{name}-public.key"
+        private_key = nacl.public.PrivateKey.generate()
+        private_key_file.write_bytes(bytes(private_key))
+        public_key_file.write_bytes(bytes(private_key.public_key))
         connection_file = directory / f"{name}-connection.json"
         consumer_output = directory / f"{name}-received.bp"
         consumer_log = directory / f"{name}-consumer.jsonl"
@@ -33,6 +40,8 @@ class BufferedSingleSocketIntegrationTests(unittest.TestCase):
             str(ROOT / "mockConsumerSingleSocketBlocking.py"),
             str(connection_file),
             str(consumer_output),
+            "--public-key",
+            str(public_key_file),
             "--timing-log",
             str(consumer_log),
             "--block-min-seconds",
@@ -70,6 +79,8 @@ class BufferedSingleSocketIntegrationTests(unittest.TestCase):
                     "512",
                     "512",
                     "5",
+                    "--private-key",
+                    str(private_key_file),
                     "--buffer-seconds",
                     str(buffer_seconds),
                     "--timing-log",

@@ -1,14 +1,14 @@
 import socket
 
 from mock_io import IO
-from socket_protocol import send_arrays, send_end, send_hello
+from socket_protocol import prove_private_key, send_arrays, send_end, send_hello
 
 
 VARIABLES = ("d1", "d2", "d3", "d4", "d5", "d6")
 
 
 class SingleSocketIO(IO):
-    def __init__(self, settings, connection_info):
+    def __init__(self, settings, connection_info, private_key):
         del settings
         self._socket = None
         host = connection_info.get("host")
@@ -24,6 +24,7 @@ class SingleSocketIO(IO):
         connection = socket.create_connection((host, port))
         try:
             connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            prove_private_key(connection, private_key)
             send_hello(connection, VARIABLES, consumer_id)
         except Exception:
             connection.close()

@@ -2,7 +2,17 @@
 
 Start the selected consumer before the producer so it can create the
 connection-information file. The file's `id` selects the producer's I/O
-implementation.
+implementation. Generate a Curve25519 keypair once and keep the private key
+with the producer:
+
+```bash
+python3 keygen.py generate keys/mockkey.pub keys/mockkey
+```
+
+The consumers encrypt all connection information with the public key. The
+producer decrypts it with the private key, then proves possession of that key
+by answering a fresh encrypted challenge on every socket. Neither key argument
+has a default and both must be supplied explicitly.
 
 ## Three-socket version
 
@@ -13,6 +23,7 @@ In the first terminal, start the consumer:
 
 ```bash
 python3 mockConsumerSockets.py socket-connection.json received.bp \
+    --public-key keys/mockkey.pub \
     --timing-log consumer-timing.jsonl
 ```
 
@@ -21,6 +32,7 @@ terminal, run the producer with a 512x512 array and 10 output steps:
 
 ```bash
 python3 mockProducer.py socket-connection.json 512 512 10 \
+    --private-key keys/mockkey \
     --timing-log producer-timing.jsonl
 ```
 
@@ -49,6 +61,7 @@ In the first terminal, start the single-socket consumer:
 
 ```bash
 python3 mockConsumerSingleSocket.py single-connection.json single-received.bp \
+    --public-key keys/mockkey.pub \
     --timing-log single-consumer-timing.jsonl
 ```
 
@@ -56,6 +69,7 @@ In a second terminal, run the producer with a 512x512 array and 10 output steps:
 
 ```bash
 python3 mockProducer.py single-connection.json 512 512 10 \
+    --private-key keys/mockkey \
     --timing-log single-producer-timing.jsonl
 ```
 
@@ -67,6 +81,7 @@ seed, and maximum number of stalls are configurable. For example:
 
 ```bash
 python3 mockConsumerSingleSocketBlocking.py connection.json received.bp \
+    --public-key keys/mockkey.pub \
     --random-seed 42 --max-blocks 1
 ```
 
@@ -101,6 +116,7 @@ address and the host name or address that the producer can reach:
 
 ```bash
 python3 mockConsumerSockets.py socket-connection.json received.bp \
+    --public-key keys/mockkey.pub \
     --bind-host 0.0.0.0 --advertise-host RECEIVER_HOST \
     --timing-log consumer-timing.jsonl
 ```

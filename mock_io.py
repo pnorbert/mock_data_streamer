@@ -5,23 +5,26 @@ from collections import deque
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from connection_security import decrypt_connection_info, load_private_key
+
 
 class IO(ABC):
     """Common producer output interface."""
 
     @classmethod
     def create(cls, settings, timing_log=None):
-        connection_info = cls._read_connection_info(settings.destination)
+        private_key = load_private_key(settings.private_key)
+        connection_info = cls._read_connection_info(settings.destination, private_key)
         io_id = connection_info.get("id", "adios") if connection_info else "adios"
 
         if io_id == "sockets":
             from socket_io import SocketIO
 
-            output = SocketIO(settings, connection_info)
+            output = SocketIO(settings, connection_info, private_key)
         elif io_id == "singlesocket":
             from single_socket_io import SingleSocketIO
 
-            output = SingleSocketIO(settings, connection_info)
+            output = SingleSocketIO(settings, connection_info, private_key)
         elif io_id == "adios":
             from adios_io import AdiosIO
 
@@ -39,7 +42,7 @@ class IO(ABC):
         )
 
     @staticmethod
-    def _read_connection_info(destination):
+    def _read_connection_info(destination, private_key):
         path = Path(destination)
         if not path.is_file():
             return None
@@ -50,9 +53,13 @@ class IO(ABC):
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
 
-        if not isinstance(connection_info, dict) or "id" not in connection_info:
+        if not isinstance(connection_info, dict):
             return None
-        return connection_info
+        if "format" not in connection_info:
+            if "id" in connection_info:
+                raise ValueError("Socket connection information must be encrypted")
+            return None
+        return decrypt_connection_info(connection_info, private_key)
 
     @staticmethod
     def data_variables(ht):

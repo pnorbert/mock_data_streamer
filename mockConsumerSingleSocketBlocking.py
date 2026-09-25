@@ -9,6 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
+from connection_security import load_public_key
 from mockConsumerSingleSocket import (
     accept_connection,
     create_listener,
@@ -49,6 +50,7 @@ def parse_args(argv):
     )
     parser.add_argument("connection_file", help="rendezvous file to create")
     parser.add_argument("output", help="ADIOS output, or pickle output fallback")
+    parser.add_argument("--public-key", required=True)
     parser.add_argument("--engine", default="BP5")
     parser.add_argument("--bind-host", default="127.0.0.1")
     parser.add_argument("--advertise-host")
@@ -135,6 +137,7 @@ def main(argv=None):
     connection_path = Path(args.connection_file)
     advertise_host = args.advertise_host or args.bind_host
     session_id = str(uuid.uuid4())
+    public_key = load_public_key(args.public_key)
     timing_log = TimingLog(args.timing_log)
     blocker = RandomReadBlocker(
         timing_log,
@@ -146,14 +149,15 @@ def main(argv=None):
     )
     listener = None
     connection = None
+    connection_file_contents = None
 
     try:
         listener = create_listener(args.bind_host)
-        write_connection_file(
-            connection_path, advertise_host, listener, session_id
+        connection_file_contents = write_connection_file(
+            connection_path, advertise_host, listener, session_id, public_key
         )
         print(f"Connection info written to {connection_path}", flush=True)
-        connection = accept_connection(listener, session_id)
+        connection = accept_connection(listener, session_id, public_key)
         receive_steps(
             connection,
             args.output,
@@ -167,7 +171,7 @@ def main(argv=None):
             connection.close()
         if listener is not None:
             listener.close()
-        remove_own_connection_file(connection_path, session_id)
+        remove_own_connection_file(connection_path, connection_file_contents)
         timing_log.close()
 
 
