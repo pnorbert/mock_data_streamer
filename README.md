@@ -39,10 +39,11 @@ This version uses three TCP connections through one listening port:
 In the first terminal, start the consumer:
 
 ```bash
-python3 mockConsumerSockets.py socket-connection.json received.bp \
+python3 mockConsumerSockets.py socket-connection.json received \
     --public-key keys/mockkey.pub \
     --allow-ip-range 127.0.0.1/32 \
     --port 5000-5009 \
+    --file-interval-seconds 3600 \
     --timing-log consumer-timing.jsonl
 ```
 
@@ -58,7 +59,10 @@ python3 mockProducer.py socket-connection.json 512 512 10 \
 The producer recognizes the `"id": "sockets"` entry in the connection file and
 opens the three data connections. It writes the initial state immediately and
 then writes approximately every three seconds. The consumer stores the 10
-received steps in `received.bp` using ADIOS BP5.
+received steps in timestamped BP5 outputs under `received/`. A new output is
+opened every 3600 seconds by default; use `--file-interval-seconds` to choose a
+different positive interval. Rotation occurs before the first step received at
+or after the interval expires.
 
 Producer output is queued and sent by a background thread, so a slow output
 does not pause the simulation. The queue holds 600 seconds of output by default;
@@ -79,7 +83,7 @@ TCP connection. Its connection ID is `singlesocket`.
 In the first terminal, start the single-socket consumer:
 
 ```bash
-python3 mockConsumerSingleSocket.py single-connection.json single-received.bp \
+python3 mockConsumerSingleSocket.py single-connection.json single-received \
     --public-key keys/mockkey.pub \
     --allow-ip-range 127.0.0.1/32 \
     --port 5000-5009 \
@@ -113,7 +117,8 @@ working_directory = /home/pnorbert/Software/LAPD/mock_data_streamer
 python = /home/pnorbert/Software/LAPD/.venv/bin/python3
 script = mockConsumerSingleSocket.py
 connection_file = conn.json
-output = out.bp
+output_directory = output
+file_interval_seconds = 3600
 stdout_log = mockConsumerSingleSocket.stdout.log
 pid_file = mockConsumerSingleSocket.pid
 public_key = keys/mockkey.pub
@@ -153,10 +158,13 @@ connection breaks, the producer closes the failed channel, launches a new
 consumer, and retries only the interrupted in-flight snapshot. Snapshots that
 were already acknowledged are not resent. The existing buffered-output queue
 then drains its unsent snapshots in FIFO order before sending newer steps; the
-simulation is never recomputed. The first consumer creates a fresh output; a
-replacement consumer opens that output in append mode so acknowledged steps
-remain present exactly once. A zero `max_relaunch_attempts` retries
-indefinitely; a positive value limits each series of SSH launch attempts.
+simulation is never recomputed. Every consumer process creates a new output
+named with its current timestamp in `output_directory`. A replacement never
+appends to an existing output, so a crash or interrupted write cannot cause it
+to reopen a potentially damaged file. The failed in-flight snapshot is retried
+into the replacement's new output; outputs from before the reconnect remain
+unchanged. A zero `max_relaunch_attempts` retries indefinitely; a positive
+value limits each series of SSH launch attempts.
 Relaunch and retry activity is recorded as `consumer.connection_lost`,
 `consumer.launch`, `consumer.launch_retry`, and `io.retry` events in the
 producer timing log.
@@ -168,7 +176,7 @@ for a random 1–100 seconds before socket reads. The range, probability, random
 seed, and maximum number of stalls are configurable. For example:
 
 ```bash
-python3 mockConsumerSingleSocketBlocking.py connection.json received.bp \
+python3 mockConsumerSingleSocketBlocking.py connection.json received \
     --public-key keys/mockkey.pub \
     --allow-ip-range 127.0.0.1/32 \
     --random-seed 42 --max-blocks 1
@@ -184,16 +192,16 @@ MOCKAPP_RUN_SOCKET_INTEGRATION=1 \
 ## Running without ADIOS2
 
 The consumers do not require the `adios2` Python module. When it is unavailable,
-an output argument such as `received.bp` is automatically changed to
-`received.pkl`. The pickle file contains one dictionary per received step, with
-the scalar `iteration` and array keys `d1` through `d6`. Read all steps from the
-pickle stream with:
+each timestamped output under a directory such as `received/` uses the `.pkl`
+suffix instead of `.bp`. Each pickle file contains one dictionary per received
+step, with the scalar `iteration` and array keys `d1` through `d6`. Read all
+steps from one pickle stream with:
 
 ```python
 import pickle
 
 steps = []
-with open("received.pkl", "rb") as stream:
+with open("received/20260925T120000.000000-0400.pkl", "rb") as stream:
     while True:
         try:
             steps.append(pickle.load(stream))
@@ -205,7 +213,7 @@ For a consumer accepting connections from another host, specify both the bind
 address and the host name or address that the producer can reach:
 
 ```bash
-python3 mockConsumerSockets.py socket-connection.json received.bp \
+python3 mockConsumerSockets.py socket-connection.json received \
     --public-key keys/mockkey.pub \
     --allow-ip-range PRODUCER_NETWORK/24 \
     --port 5000-5009 \

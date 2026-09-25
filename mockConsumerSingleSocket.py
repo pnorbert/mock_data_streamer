@@ -10,7 +10,11 @@ from connection_security import (
     remove_connection_file_if_unchanged,
     write_encrypted_connection_file,
 )
-from consumer_output import create_consumer_output
+from consumer_output import (
+    DEFAULT_FILE_INTERVAL_SECONDS,
+    create_consumer_output,
+    positive_float,
+)
 from network_access import (
     accept_from_allowed_network,
     create_tcp_listener,
@@ -32,7 +36,10 @@ def parse_args(argv):
         description="Receive all mockProducer arrays over one TCP connection."
     )
     parser.add_argument("connection_file", help="rendezvous file to create")
-    parser.add_argument("output", help="ADIOS output, or pickle output fallback")
+    parser.add_argument(
+        "output_directory",
+        help="directory for timestamped ADIOS outputs, or pickle fallbacks",
+    )
     parser.add_argument(
         "--public-key",
         required=True,
@@ -74,9 +81,10 @@ def parse_args(argv):
         help="timing log file (default: mockConsumerSingleSocket.log)",
     )
     parser.add_argument(
-        "--append-output",
-        action="store_true",
-        help="append steps to an output created by an earlier consumer",
+        "--file-interval-seconds",
+        type=positive_float,
+        default=DEFAULT_FILE_INTERVAL_SECONDS,
+        help="seconds between new output files (default: 3600)",
     )
     return parser.parse_args(argv)
 
@@ -123,11 +131,11 @@ def accept_connection(listener, session_id, public_key, allowed_networks):
 
 def receive_steps(
     connection,
-    output,
+    output_directory,
     engine,
     timing_log,
     before_receive=None,
-    append_output=False,
+    file_interval_seconds=DEFAULT_FILE_INTERVAL_SECONDS,
 ):
     io = None
     step = 0
@@ -162,7 +170,10 @@ def receive_steps(
                 if len(shape) != 2:
                     raise RuntimeError(f"Expected 2-D arrays, received shape {shape}")
                 io = create_consumer_output(
-                    output, engine, shape, append=append_output
+                    output_directory,
+                    engine,
+                    shape,
+                    interval_seconds=file_interval_seconds,
                 )
 
             write_called_at = timestamp()
@@ -220,10 +231,10 @@ def main(argv=None):
         )
         receive_steps(
             connection,
-            args.output,
+            args.output_directory,
             args.engine,
             timing_log,
-            append_output=args.append_output,
+            file_interval_seconds=args.file_interval_seconds,
         )
         print("Producer closed the socket channel", flush=True)
     finally:

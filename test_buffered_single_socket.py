@@ -31,7 +31,7 @@ class BufferedSingleSocketIntegrationTests(unittest.TestCase):
         private_key_file.write_bytes(bytes(private_key))
         public_key_file.write_bytes(bytes(private_key.public_key))
         connection_file = directory / f"{name}-connection.json"
-        consumer_output = directory / f"{name}-received.bp"
+        consumer_output = directory / f"{name}-received"
         consumer_log = directory / f"{name}-consumer.jsonl"
         producer_log = directory / f"{name}-producer.jsonl"
 

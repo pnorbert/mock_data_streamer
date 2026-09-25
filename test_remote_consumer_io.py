@@ -1,6 +1,5 @@
 import configparser
 import json
-import pickle
 import tempfile
 import threading
 import unittest
@@ -13,7 +12,6 @@ import numpy as np
 
 from connection_security import encrypt_connection_info
 from mock_io import BufferedIO
-from pickle_io import PickleIO
 from remote_consumer_io import (
     RestartingSingleSocketIO,
     SSHConsumerLauncher,
@@ -28,7 +26,8 @@ working_directory = /srv/mock streamer
 python = /srv/venv/bin/python3
 script = mockConsumerSingleSocket.py
 connection_file = conn.json
-output = out.bp
+output_directory = output
+file_interval_seconds = 1800
 stdout_log = consumer output.log
 pid_file = consumer.pid
 public_key = keys/mockkey.pub
@@ -71,10 +70,8 @@ class RemoteConsumerTests(unittest.TestCase):
             self.assertIn("--allow-ip-range 192.168.1.0/24", remote)
             self.assertIn("--allow-ip-range 10.0.0.0/8", remote)
             self.assertNotIn("--append-output", remote)
-            self.assertIn(
-                "--append-output",
-                SSHConsumerLauncher(config)._remote_command(append_output=True),
-            )
+            self.assertIn("--file-interval-seconds 1800.0", remote)
+            self.assertIn("conn.json output", remote)
 
     def test_server_config_rejects_missing_network(self):
         parser = configparser.ConfigParser()
@@ -139,7 +136,7 @@ class RemoteConsumerTests(unittest.TestCase):
         self.assertEqual(launcher.launch.call_count, 2)
         self.assertEqual(
             launcher.launch.call_args_list,
-            [mock.call(append_output=False), mock.call(append_output=True)],
+            [mock.call(), mock.call()],
         )
         first.abort.assert_called_once_with()
         second.write_data.assert_called_once()
@@ -215,29 +212,6 @@ class RemoteConsumerTests(unittest.TestCase):
             for call in second.write_data.call_args_list
         ]
         self.assertEqual(sent_iterations, [11, 12, 13, 14, 15, 16])
-
-    def test_pickle_output_appends_after_consumer_restart(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "out.pkl"
-            first = PickleIO(
-                SimpleNamespace(destination=output, append_output=False)
-            )
-            first.write_data({"step": 10})
-            first.close()
-
-            replacement = PickleIO(
-                SimpleNamespace(destination=output, append_output=True)
-            )
-            replacement.write_data({"step": 11})
-            replacement.write_data({"step": 12})
-            replacement.close()
-
-            with output.open("rb") as stream:
-                steps = [pickle.load(stream) for _ in range(3)]
-                with self.assertRaises(EOFError):
-                    pickle.load(stream)
-            self.assertEqual([step["step"] for step in steps], [10, 11, 12])
-
 
 if __name__ == "__main__":
     unittest.main()

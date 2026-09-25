@@ -44,7 +44,7 @@ class ServerConfig:
         self.python = values.get("python", "python3").strip()
         self.script = values.get("script", "mockConsumerSingleSocket.py").strip()
         self.connection_file = values.get("connection_file", "conn.json").strip()
-        self.output = values.get("output", "out.bp").strip()
+        self.output_directory = values.get("output_directory", "out").strip()
         self.public_key = self._required(values, "public_key")
         self.allow_ip_ranges = tuple(
             item.strip()
@@ -59,6 +59,9 @@ class ServerConfig:
         self.advertise_host = values.get("advertise_host", fallback=None)
         self.engine = values.get("engine", fallback=None)
         self.timing_log = values.get("timing_log", fallback=None)
+        self.file_interval_seconds = self._positive_float(
+            values, "file_interval_seconds", 3600.0
+        )
         self.stdout_log = values.get(
             "stdout_log", "mockConsumerSingleSocket.stdout.log"
         ).strip()
@@ -85,7 +88,7 @@ class ServerConfig:
             "python",
             "script",
             "connection_file",
-            "output",
+            "output_directory",
             "stdout_log",
             "pid_file",
         ):
@@ -149,8 +152,8 @@ class SSHConsumerLauncher:
     def __init__(self, config):
         self.config = config
 
-    def launch(self, append_output=False):
-        command = self._remote_command(append_output=append_output)
+    def launch(self):
+        command = self._remote_command()
         try:
             completed = subprocess.run(
                 [*self.config.ssh_command, self.config.host, command],
@@ -180,13 +183,15 @@ class SSHConsumerLauncher:
             ) from exc
         return envelope
 
-    def _consumer_arguments(self, append_output=False):
+    def _consumer_arguments(self):
         cfg = self.config
         arguments = [
             cfg.python,
             cfg.script,
             "--public-key",
             cfg.public_key,
+            "--file-interval-seconds",
+            str(cfg.file_interval_seconds),
         ]
         for network in cfg.allow_ip_ranges:
             arguments.extend(("--allow-ip-range", network))
@@ -199,12 +204,10 @@ class SSHConsumerLauncher:
         ):
             if value:
                 arguments.extend((option, value))
-        if append_output:
-            arguments.append("--append-output")
-        arguments.extend((cfg.connection_file, cfg.output))
+        arguments.extend((cfg.connection_file, cfg.output_directory))
         return arguments
 
-    def _remote_command(self, append_output=False):
+    def _remote_command(self):
         cfg = self.config
         quote = shlex.quote
         workdir = quote(cfg.working_directory)
@@ -214,7 +217,7 @@ class SSHConsumerLauncher:
         script = quote(cfg.script)
         consumer = " ".join(
             quote(item)
-            for item in self._consumer_arguments(append_output=append_output)
+            for item in self._consumer_arguments()
         )
         polls = max(1, math.ceil(cfg.startup_timeout_seconds * 10))
         # All consumer descriptors are redirected before the SSH shell exits.
@@ -282,8 +285,8 @@ class RestartingSingleSocketIO(IO):
         self._closed = False
         self._connect_with_retries("launch")
 
-    def _new_output(self, append_output=False):
-        envelope = self._launcher.launch(append_output=append_output)
+    def _new_output(self):
+        envelope = self._launcher.launch()
         connection_info = decrypt_connection_info(envelope, self._private_key)
         if connection_info.get("id") != "singlesocket":
             raise ValueError("Remote consumer must use the singlesocket protocol")
@@ -297,9 +300,7 @@ class RestartingSingleSocketIO(IO):
         while True:
             attempt += 1
             try:
-                self._output = self._new_output(
-                    append_output=reason == "connection_lost"
-                )
+                self._output = self._new_output()
                 self._record(
                     "consumer.launch",
                     reason=reason,

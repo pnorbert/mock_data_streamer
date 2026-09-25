@@ -31,7 +31,7 @@ class SecureSocketIntegrationTests(unittest.TestCase):
         private_key_file.write_bytes(bytes(private_key))
         public_key_file.write_bytes(bytes(private_key.public_key))
         connection_file = directory / f"{consumer_script}-connection.json"
-        consumer_output = directory / f"{consumer_script}-received.bp"
+        consumer_output = directory / f"{consumer_script}-received"
         consumer_log = directory / f"{consumer_script}-consumer.jsonl"
         producer_log = directory / f"{consumer_script}-producer.jsonl"
         consumer = subprocess.Popen(
@@ -125,7 +125,7 @@ class SecureSocketIntegrationTests(unittest.TestCase):
                         sys.executable,
                         str(ROOT / "mockConsumerSingleSocket.py"),
                         str(connection_file),
-                        str(directory / "received.bp"),
+                        str(directory / "received"),
                         "--public-key",
                         str(public_key_file),
                         "--allow-ip-range",

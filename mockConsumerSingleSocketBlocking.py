@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from connection_security import load_public_key
+from consumer_output import DEFAULT_FILE_INTERVAL_SECONDS
 from mockConsumerSingleSocket import (
     accept_connection,
     create_listener,
@@ -50,7 +51,10 @@ def parse_args(argv):
         )
     )
     parser.add_argument("connection_file", help="rendezvous file to create")
-    parser.add_argument("output", help="ADIOS output, or pickle output fallback")
+    parser.add_argument(
+        "output_directory",
+        help="directory for timestamped ADIOS outputs, or pickle fallbacks",
+    )
     parser.add_argument("--public-key", required=True)
     parser.add_argument(
         "--allow-ip-range",
@@ -67,7 +71,12 @@ def parse_args(argv):
         "--timing-log",
         default="mockConsumerSingleSocketBlocking.log",
     )
-    parser.add_argument("--append-output", action="store_true")
+    parser.add_argument(
+        "--file-interval-seconds",
+        type=positive_float,
+        default=DEFAULT_FILE_INTERVAL_SECONDS,
+        help="seconds between new output files (default: 3600)",
+    )
     parser.add_argument(
         "--block-min-seconds",
         type=positive_float,
@@ -172,11 +181,11 @@ def main(argv=None):
         )
         receive_steps(
             connection,
-            args.output,
+            args.output_directory,
             args.engine,
             timing_log,
             before_receive=blocker,
-            append_output=args.append_output,
+            file_interval_seconds=args.file_interval_seconds,
         )
         print("Producer closed the socket channel", flush=True)
     finally:
