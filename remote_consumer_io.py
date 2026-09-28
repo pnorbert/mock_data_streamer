@@ -3,9 +3,11 @@
 import configparser
 import json
 import math
+import os
 import shlex
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -16,6 +18,7 @@ from data_operations import load_data_operation
 from mock_io import IO
 from ntfy_notifications import NtfyNotifier
 from single_socket_io import SingleSocketIO
+from ssh_key_monitor import read_certificate_validity
 
 
 class ServerConfig:
@@ -87,8 +90,8 @@ class ServerConfig:
             values, "socket_timeout_seconds", 30.0
         )
         self.ntfy_topic_info = values.get("ntfy_topic_info", "").strip() or None
-        self.ntfy_topic_action = (
-            values.get("ntfy_topic_action", "").strip() or None
+        self.ntfy_topic_alert = (
+            values.get("ntfy_topic_alert", "").strip() or None
         )
         self.ntfy_server_url = values.get(
             "ntfy_server_url", "https://ntfy.sh"
@@ -97,10 +100,20 @@ class ServerConfig:
         self.ntfy_timeout_seconds = self._positive_float(
             values, "ntfy_timeout_seconds", 5.0
         )
-        if (self.ntfy_topic_info or self.ntfy_topic_action) and not self.ntfy_server_url:
+        if (
+            self.ntfy_topic_info or self.ntfy_topic_alert
+        ) and not self.ntfy_server_url:
             raise ValueError("server ntfy_server_url must not be empty")
-        if (self.ntfy_topic_info or self.ntfy_topic_action) and not self.ntfy_token_env:
+        if (
+            self.ntfy_topic_info or self.ntfy_topic_alert
+        ) and not self.ntfy_token_env:
             raise ValueError("server ntfy_token_env must not be empty")
+        self.ssh_key_certificate = (
+            values.get("ssh_key_certificate", "").strip() or None
+        )
+        self.ssh_key_check_interval_seconds = self._positive_float(
+            values, "ssh_key_check_interval_seconds", 60.0
+        )
         self.retry_delay_seconds = self._nonnegative_float(
             values, "retry_delay_seconds", 1.0
         )
@@ -416,6 +429,8 @@ class SSHControlConnection:
         self.ssh_command = [
             executable,
             "-o",
+            "BatchMode=yes",
+            "-o",
             "ControlMaster=auto",
             "-o",
             f"ControlPath={self.control_path}",
@@ -453,8 +468,54 @@ class SSHControlConnection:
             self._directory.cleanup()
 
 
+class SSHKeyMonitorProcess:
+    """Run the SSH certificate expiry monitor independently of the producer."""
+
+    def __init__(self, config):
+        self._process = None
+        certificate = getattr(config, "ssh_key_certificate", None)
+        topic = getattr(config, "ntfy_topic_alert", None)
+        if not certificate or not topic:
+            return
+        monitor_script = Path(__file__).with_name("ssh_key_monitor.py")
+        self._process = subprocess.Popen(
+            [
+                sys.executable,
+                str(monitor_script),
+                "--certificate",
+                certificate,
+                "--topic",
+                topic,
+                "--server-url",
+                config.ntfy_server_url,
+                "--token-env",
+                config.ntfy_token_env,
+                "--timeout-seconds",
+                str(config.ntfy_timeout_seconds),
+                "--interval-seconds",
+                str(config.ssh_key_check_interval_seconds),
+                "--parent-pid",
+                str(os.getpid()),
+            ],
+            stdin=subprocess.DEVNULL,
+            close_fds=True,
+        )
+
+    def close(self):
+        if self._process is None or self._process.poll() is not None:
+            return
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait()
+
+
 class RestartingSingleSocketIO(IO):
     """Reconnect a remote consumer and retry only the interrupted output."""
+
+    EXPIRED_KEY_RELAUNCH_ATTEMPTS = 1
 
     def __init__(
         self,
@@ -464,6 +525,7 @@ class RestartingSingleSocketIO(IO):
         launcher=None,
         timing_log=None,
         notifier=None,
+        alert_notifier=None,
     ):
         self._timing_log = timing_log
         self._private_key = private_key
@@ -474,12 +536,15 @@ class RestartingSingleSocketIO(IO):
         self._notifier = notifier or NtfyNotifier.from_config(
             self._config, timing_log=timing_log
         )
+        self._alert_notifier = alert_notifier or NtfyNotifier.from_config(
+            self._config,
+            timing_log=timing_log,
+            topic_attribute="ntfy_topic_alert",
+        )
+        self._key_monitor = None
         self._ssh_control = None
         ssh_command = getattr(self._config, "ssh_command", None)
-        if (
-            getattr(self._config, "socket_transport", "direct") == "ssh"
-            and launcher is None
-        ):
+        if launcher is None:
             self._ssh_control = SSHControlConnection(self._config)
             ssh_command = self._ssh_control.ssh_command
         self._launcher = launcher or SSHConsumerLauncher(self._config, ssh_command)
@@ -491,12 +556,17 @@ class RestartingSingleSocketIO(IO):
         self._output = None
         self._closed = False
         try:
+            self._key_monitor = SSHKeyMonitorProcess(self._config)
             self._connect_with_retries("launch")
         except Exception:
+            if self._key_monitor is not None:
+                self._key_monitor.close()
             if self._ssh_control is not None:
                 self._ssh_control.close()
             if self._notifier is not None:
                 self._notifier.close()
+            if self._alert_notifier is not None:
+                self._alert_notifier.close()
             raise
 
     @property
@@ -521,6 +591,8 @@ class RestartingSingleSocketIO(IO):
 
     def _connect_with_retries(self, reason):
         attempt = 0
+        expired_key_attempts = 0
+        restart_failure_notified = False
         while True:
             attempt += 1
             try:
@@ -542,18 +614,83 @@ class RestartingSingleSocketIO(IO):
                         tags=("white_check_mark",),
                     )
                 return
-            except (OSError, EOFError, RuntimeError):
-                maximum = self._config.max_relaunch_attempts
-                if maximum and attempt >= maximum:
-                    raise
+            except (OSError, EOFError, RuntimeError) as exc:
                 self._record(
                     "consumer.launch_retry",
                     reason=reason,
                     attempt=attempt,
                     host=self._config.host,
                 )
+                if (
+                    reason == "connection_lost"
+                    and not restart_failure_notified
+                    and self._alert_notifier is not None
+                ):
+                    self._alert_notifier.notify(
+                        "Mock data server restart failed",
+                        f"Restart attempt {attempt} for the remote consumer on "
+                        f"{self._config.host} failed: {type(exc).__name__}: {exc}",
+                        priority=5,
+                        tags=("rotating_light",),
+                    )
+                    restart_failure_notified = True
+                maximum = self._config.max_relaunch_attempts
+                if maximum and attempt >= maximum:
+                    raise
+                expired_certificate = self._expired_ssh_certificate()
+                if expired_certificate is None:
+                    expired_key_attempts = 0
+                else:
+                    expired_key_attempts += 1
+                    if (
+                        expired_key_attempts
+                        >= self.EXPIRED_KEY_RELAUNCH_ATTEMPTS
+                    ):
+                        self._wait_for_ssh_key_update(expired_certificate)
+                        attempt = 0
+                        expired_key_attempts = 0
+                        continue
                 if self._config.retry_delay_seconds:
                     time.sleep(self._config.retry_delay_seconds)
+
+    def _expired_ssh_certificate(self):
+        certificate = getattr(self._config, "ssh_key_certificate", None)
+        if not certificate:
+            return None
+        try:
+            validity = read_certificate_validity(certificate)
+        except ValueError:
+            return None
+        return validity if time.time() >= validity.valid_before else None
+
+    def _wait_for_ssh_key_update(self, expired_certificate):
+        certificate = self._config.ssh_key_certificate
+        interval = getattr(
+            self._config, "ssh_key_check_interval_seconds", 60.0
+        )
+        self._record(
+            "ssh_key.wait",
+            certificate=certificate,
+            expired_at=expired_certificate.valid_before,
+        )
+        while True:
+            try:
+                replacement = read_certificate_validity(certificate)
+            except ValueError:
+                replacement = None
+            now = time.time()
+            if (
+                replacement is not None
+                and replacement != expired_certificate
+                and replacement.valid_after <= now < replacement.valid_before
+            ):
+                self._record(
+                    "ssh_key.updated",
+                    certificate=certificate,
+                    valid_before=replacement.valid_before,
+                )
+                return
+            time.sleep(interval)
 
     def write_data(self, data):
         if self._closed:
@@ -606,8 +743,16 @@ class RestartingSingleSocketIO(IO):
             self._discard_output()
         finally:
             try:
-                if self._ssh_control is not None:
-                    self._ssh_control.close()
+                if self._key_monitor is not None:
+                    self._key_monitor.close()
             finally:
-                if self._notifier is not None:
-                    self._notifier.close()
+                try:
+                    if self._ssh_control is not None:
+                        self._ssh_control.close()
+                finally:
+                    try:
+                        if self._notifier is not None:
+                            self._notifier.close()
+                    finally:
+                        if self._alert_notifier is not None:
+                            self._alert_notifier.close()

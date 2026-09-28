@@ -41,8 +41,13 @@ class NtfyNotifier:
         self._worker.start()
 
     @classmethod
-    def from_config(cls, config, timing_log=None):
-        topic = getattr(config, "ntfy_topic_info", None)
+    def from_config(
+        cls,
+        config,
+        timing_log=None,
+        topic_attribute="ntfy_topic_info",
+    ):
+        topic = getattr(config, topic_attribute, None)
         if not topic:
             return None
         return cls(

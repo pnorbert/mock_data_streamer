@@ -198,11 +198,13 @@ allow_ip_range = 127.0.0.1/32
 This runs an OpenSSH stdio forward equivalent to `ssh -W HOST:PORT` and uses
 the host, keys, `ProxyJump`, and other options from the normal SSH
 configuration. No local listening port is allocated. The SSH forwarding
-process is closed and re-created along with each consumer connection. Launch
-and forwarding channels share a private OpenSSH control connection so a
-load-balanced SSH destination cannot send them to different servers. Use
-`socket_transport = direct` (or omit the setting) when the producer can reach
-the advertised socket normally.
+process is closed and re-created along with each consumer connection. Both
+transport modes keep a private OpenSSH control connection alive for remote
+consumer launches. In SSH transport mode the forwarding channels also share
+that connection, so a load-balanced SSH destination cannot send them to
+different servers. Use `socket_transport = direct` (or omit the setting) when
+the producer can reach the advertised socket normally; the control connection
+is retained for service restarts even though data does not travel through it.
 
 Start the producer normally, using the configuration as its destination:
 
@@ -216,8 +218,9 @@ python3 mockProducer.py server.conf 512 512 10 \
 The remote command removes stale rendezvous information, stops the process
 recorded in `pid_file`, and starts the consumer with `nohup`. Its stdin is
 `/dev/null`, and both stdout and stderr are appended to `stdout_log`. Once the
-new encrypted connection information is printed back to the producer, the SSH
-session exits; the consumer no longer depends on that session.
+new encrypted connection information is printed back to the producer, that
+SSH channel exits; the shared control connection stays alive until the
+producer closes, while the consumer itself does not depend on either one.
 
 `socket_timeout_seconds` bounds every socket operation, including the
 per-step acknowledgement. If the consumer stalls past that timeout or the TCP
@@ -231,10 +234,14 @@ appends to an existing output, so a crash or interrupted write cannot cause it
 to reopen a potentially damaged file. The failed in-flight snapshot is retried
 into the replacement's new output; outputs from before the reconnect remain
 unchanged. A zero `max_relaunch_attempts` retries indefinitely; a positive
-value limits each series of SSH launch attempts.
+value limits each series of SSH launch attempts. When the configured local SSH
+certificate is expired, one failed launch is enough to pause further SSH
+attempts. The producer checks only the local certificate while paused and
+resumes launching after it detects a different certificate that is currently
+valid.
 Relaunch and retry activity is recorded as `consumer.connection_lost`,
-`consumer.launch`, `consumer.launch_retry`, and `io.retry` events in the
-producer timing log.
+`consumer.launch`, `consumer.launch_retry`, `ssh_key.wait`, `ssh_key.updated`,
+and `io.retry` events in the producer timing log.
 
 ### ntfy notifications
 
@@ -242,24 +249,39 @@ Remote-server configurations can enable best-effort ntfy notifications:
 
 ```ini
 ntfy_topic_info = my-info-topic
-# Reserved for future notifications that require an operator action:
-ntfy_topic_action = my-action-topic
+# SSH certificate issues and failed restarts are sent here:
+ntfy_topic_alert = my-alert-topic
+# OpenSSH certificate created by NERSC sshproxy:
+ssh_key_certificate = ~/.ssh/nersc-cert.pub
 # Optional settings shown with their defaults:
 ntfy_server_url = https://ntfy.sh
 ntfy_token_env = NTFY_TOKEN
 ntfy_timeout_seconds = 5
+ssh_key_check_interval_seconds = 60
 ```
 
-All current notifications are sent asynchronously to `ntfy_topic_info` when
-the remote consumer starts, restarts, or disconnects. Buffer notifications at
-20%, 40%, and 60% are each sent once per producer run. While the buffer is at
-least 80% full, a high-buffer notification is sent immediately and then at
-most once per hour. An hourly notification reports the number of snapshots
-discarded since the preceding high-buffer notification when that number is
-nonzero. `ntfy_topic_action` is parsed but is not used yet. Notification
-failures do not interrupt output; they are recorded as `notification.failed`
-events in the producer timing log. Set the access token in the environment
-rather than the configuration file, for example
+Notifications are sent asynchronously to `ntfy_topic_info` when the remote
+consumer starts, restarts, or disconnects. Buffer notifications at 20%, 40%,
+and 60% are each sent once per producer run. While the buffer is at least 80%
+full, a high-buffer notification is sent immediately and then at most once per
+hour. An hourly notification reports the number of snapshots discarded since
+the preceding high-buffer notification when that number is nonzero. Consumer
+disconnect and buffer-loss reports remain on the info topic.
+
+When `ssh_key_certificate` and `ntfy_topic_alert` are set, the producer starts
+a separate monitor process. It obtains the certificate's actual end time
+locally with `ssh-keygen -L` and sends one alert at 6, 3, 2, and 1 hour before
+expiration, plus an alert if the certificate is expired, missing, invalid, or
+not yet valid. The first failed remote-consumer restart attempt in each
+reconnect episode is also sent to the alert topic; subsequent attempts in that
+episode do not send duplicate alerts.
+The monitor re-reads the file on every check, so replacing the certificate with
+`sshproxy` resets the warning schedule without restarting the producer. The
+monitor stops with the producer and never opens an SSH connection.
+
+Notification failures do not interrupt output. Notifications sent by the main
+producer are recorded as `notification.failed` events in its timing log. Set
+the access token in the environment rather than the configuration file, for example
 `export NTFY_TOKEN=tk_...` before starting the producer.
 
 ### Deliberately blocking test consumer

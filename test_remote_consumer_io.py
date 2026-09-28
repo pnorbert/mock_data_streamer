@@ -1,5 +1,6 @@
 import configparser
 import json
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -16,9 +17,11 @@ from socket_protocol import PROTOCOL_VERSION
 from remote_consumer_io import (
     RestartingSingleSocketIO,
     SSHConsumerLauncher,
+    SSHKeyMonitorProcess,
     SSHSocketConnector,
     ServerConfig,
 )
+from ssh_key_monitor import CertificateValidity
 
 
 CONFIG = """\
@@ -105,7 +108,9 @@ class RemoteConsumerTests(unittest.TestCase):
             parser = configparser.ConfigParser()
             parser.read_string(CONFIG)
             parser["server"]["ntfy_topic_info"] = "test-info-topic"
-            parser["server"]["ntfy_topic_action"] = "test-action-topic"
+            parser["server"]["ntfy_topic_alert"] = "test-alert-topic"
+            parser["server"]["ssh_key_certificate"] = "~/.ssh/nersc-cert.pub"
+            parser["server"]["ssh_key_check_interval_seconds"] = "30"
             parser["server"]["ntfy_server_url"] = "https://ntfy.example.test"
             parser["server"]["ntfy_token_env"] = "TEST_NTFY_TOKEN"
             parser["server"]["ntfy_timeout_seconds"] = "2"
@@ -115,10 +120,41 @@ class RemoteConsumerTests(unittest.TestCase):
             config = ServerConfig(path)
 
         self.assertEqual(config.ntfy_topic_info, "test-info-topic")
-        self.assertEqual(config.ntfy_topic_action, "test-action-topic")
+        self.assertEqual(config.ntfy_topic_alert, "test-alert-topic")
+        self.assertEqual(config.ssh_key_certificate, "~/.ssh/nersc-cert.pub")
+        self.assertEqual(config.ssh_key_check_interval_seconds, 30)
         self.assertEqual(config.ntfy_server_url, "https://ntfy.example.test")
         self.assertEqual(config.ntfy_token_env, "TEST_NTFY_TOKEN")
         self.assertEqual(config.ntfy_timeout_seconds, 2)
+
+    def test_starts_and_stops_separate_ssh_key_monitor_process(self):
+        config = SimpleNamespace(
+            ssh_key_certificate="~/.ssh/nersc-cert.pub",
+            ntfy_topic_alert="test-alert-topic",
+            ntfy_server_url="https://ntfy.example.test",
+            ntfy_token_env="TEST_NTFY_TOKEN",
+            ntfy_timeout_seconds=2,
+            ssh_key_check_interval_seconds=30,
+        )
+        process = mock.Mock()
+        process.poll.return_value = None
+
+        with mock.patch(
+            "remote_consumer_io.subprocess.Popen", return_value=process
+        ) as popen:
+            monitor = SSHKeyMonitorProcess(config)
+            monitor.close()
+
+        arguments = popen.call_args.args[0]
+        self.assertIn("ssh_key_monitor.py", arguments[1])
+        self.assertIn("--certificate", arguments)
+        self.assertIn("~/.ssh/nersc-cert.pub", arguments)
+        self.assertIn("--topic", arguments)
+        self.assertIn("test-alert-topic", arguments)
+        self.assertIn("--parent-pid", arguments)
+        self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5.0)
 
     def test_server_config_resolves_compression_config_relative_to_itself(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -278,6 +314,50 @@ class RemoteConsumerTests(unittest.TestCase):
             self.assertIn("exit", cleanup_arguments)
             self.assertIn("-S", cleanup_arguments)
 
+    def test_direct_transport_keeps_launch_control_connection(self):
+        private_key = nacl.public.PrivateKey.generate()
+        connection_info = {
+            "id": "singlesocket",
+            "protocol_version": PROTOCOL_VERSION,
+            "consumer_id": "session",
+            "host": "127.0.0.1",
+            "port": 8501,
+        }
+        envelope = json.loads(
+            encrypt_connection_info(connection_info, private_key.public_key)
+        )
+        settings = SimpleNamespace(destination="unused")
+        socket_output = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.make_config(Path(temporary))
+            self.assertEqual(config.socket_transport, "direct")
+            launcher = mock.Mock()
+            launcher.launch.return_value = envelope
+            with (
+                mock.patch(
+                    "remote_consumer_io.SSHConsumerLauncher",
+                    return_value=launcher,
+                ) as launcher_class,
+                mock.patch(
+                    "remote_consumer_io.SingleSocketIO",
+                    return_value=socket_output,
+                ) as single_socket,
+                mock.patch("remote_consumer_io.subprocess.run") as run,
+            ):
+                output = RestartingSingleSocketIO(
+                    settings, private_key, config=config
+                )
+                launch_command = launcher_class.call_args.args[1]
+                self.assertIn("ControlMaster=auto", " ".join(launch_command))
+                self.assertIn("BatchMode=yes", " ".join(launch_command))
+                self.assertIsNone(single_socket.call_args.kwargs["connector"])
+                output.close()
+
+            cleanup_arguments = run.call_args.args[0]
+            self.assertIn("-O", cleanup_arguments)
+            self.assertIn("exit", cleanup_arguments)
+
     def test_disconnect_retries_failed_step_without_resending_successes(self):
         private_key = nacl.public.PrivateKey.generate()
         connection_info = {
@@ -387,6 +467,125 @@ class RemoteConsumerTests(unittest.TestCase):
             ],
         )
         notifier.close.assert_called_once_with()
+
+    def test_notifies_alert_once_when_restart_attempts_fail(self):
+        private_key = nacl.public.PrivateKey.generate()
+        connection_info = {
+            "id": "singlesocket",
+            "protocol_version": PROTOCOL_VERSION,
+            "consumer_id": "session",
+            "host": "127.0.0.1",
+            "port": 8501,
+        }
+        envelope = json.loads(
+            encrypt_connection_info(connection_info, private_key.public_key)
+        )
+        launcher = mock.Mock()
+        launcher.launch.side_effect = [
+            envelope,
+            OSError("first restart failed"),
+            OSError("second restart failed"),
+            envelope,
+        ]
+        info_notifier = mock.Mock()
+        alert_notifier = mock.Mock()
+        config = SimpleNamespace(
+            host="example-host",
+            socket_timeout_seconds=5,
+            max_relaunch_attempts=0,
+            retry_delay_seconds=0,
+        )
+        settings = SimpleNamespace(destination="unused")
+        first = mock.Mock()
+        first.write_data.side_effect = OSError("connection reset")
+        replacement = mock.Mock()
+
+        with mock.patch(
+            "remote_consumer_io.SingleSocketIO",
+            side_effect=[first, replacement],
+        ):
+            output = RestartingSingleSocketIO(
+                settings,
+                private_key,
+                config=config,
+                launcher=launcher,
+                notifier=info_notifier,
+                alert_notifier=alert_notifier,
+            )
+            output.write_data({})
+            output.close()
+
+        alert_notifier.notify.assert_called_once()
+        self.assertEqual(
+            alert_notifier.notify.call_args.args[0],
+            "Mock data server restart failed",
+        )
+        self.assertIn(
+            "first restart failed", alert_notifier.notify.call_args.args[1]
+        )
+        alert_notifier.close.assert_called_once_with()
+
+    def test_expired_ssh_launch_pauses_after_one_attempt_until_replaced(self):
+        private_key = nacl.public.PrivateKey.generate()
+        connection_info = {
+            "id": "singlesocket",
+            "protocol_version": PROTOCOL_VERSION,
+            "consumer_id": "session",
+            "host": "127.0.0.1",
+            "port": 8501,
+        }
+        envelope = json.loads(
+            encrypt_connection_info(connection_info, private_key.public_key)
+        )
+        launcher = mock.Mock()
+        launcher.launch.side_effect = [
+            envelope,
+            OSError("Permission denied (publickey)"),
+            envelope,
+        ]
+        expired = CertificateValidity(valid_after=1.0, valid_before=50.0)
+        replacement_validity = CertificateValidity(
+            valid_after=90.0, valid_before=200.0
+        )
+        config = SimpleNamespace(
+            host="example-host",
+            socket_timeout_seconds=5,
+            max_relaunch_attempts=0,
+            retry_delay_seconds=0,
+            ssh_key_certificate="/tmp/nersc-cert.pub",
+            ssh_key_check_interval_seconds=30,
+        )
+        settings = SimpleNamespace(destination="unused")
+        first = mock.Mock()
+        first.write_data.side_effect = OSError("connection reset")
+        replacement = mock.Mock()
+
+        with (
+            mock.patch(
+                "remote_consumer_io.SingleSocketIO",
+                side_effect=[first, replacement],
+            ),
+            mock.patch(
+                "remote_consumer_io.read_certificate_validity",
+                side_effect=[
+                    expired,
+                    expired,
+                    replacement_validity,
+                ],
+            ),
+            mock.patch("remote_consumer_io.time.time", return_value=100.0),
+            mock.patch("remote_consumer_io.time.sleep") as sleep,
+        ):
+            output = RestartingSingleSocketIO(
+                settings, private_key, config=config, launcher=launcher
+            )
+            interrupted = {"iteration": np.array(42, dtype=np.int64)}
+            output.write_data(interrupted)
+            output.close()
+
+        self.assertEqual(launcher.launch.call_count, 3)
+        sleep.assert_called_once_with(30)
+        replacement.write_data.assert_called_once_with(interrupted)
 
     def test_retried_in_flight_step_precedes_buffered_steps(self):
         private_key = nacl.public.PrivateKey.generate()
