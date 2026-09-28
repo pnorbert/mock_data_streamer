@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from connection_security import decrypt_connection_info
+from data_operations import load_data_operation
 from mock_io import IO
 from ntfy_notifications import NtfyNotifier
 from single_socket_io import SingleSocketIO
@@ -105,6 +106,12 @@ class ServerConfig:
         )
         self.max_relaunch_attempts = self._nonnegative_int(
             values, "max_relaunch_attempts", 0
+        )
+        compression_config = values.get("compression_config", "").strip()
+        self.compression_config = (
+            self.path.parent / compression_config
+            if compression_config and not Path(compression_config).is_absolute()
+            else Path(compression_config) if compression_config else None
         )
 
         for name in (
@@ -461,6 +468,9 @@ class RestartingSingleSocketIO(IO):
         self._timing_log = timing_log
         self._private_key = private_key
         self._config = config or ServerConfig(settings.destination)
+        self._operation = load_data_operation(
+            getattr(self._config, "compression_config", None)
+        )
         self._notifier = notifier or NtfyNotifier.from_config(
             self._config, timing_log=timing_log
         )
@@ -506,6 +516,7 @@ class RestartingSingleSocketIO(IO):
             connection_info,
             self._private_key,
             connector=self._connector,
+            operation=self._operation,
         )
 
     def _connect_with_retries(self, reason):

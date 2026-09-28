@@ -9,10 +9,13 @@ import nacl.exceptions
 import nacl.public
 import numpy as np
 
+from data_operations import data_operation_from_description
+
 
 _HEADER_LENGTH = struct.Struct("!Q")
 _MAX_HEADER_BYTES = 1024 * 1024
 _AUTH_CHALLENGE_BYTES = 32
+PROTOCOL_VERSION = 4
 
 
 def _send_header(sock, header):
@@ -75,29 +78,35 @@ def prove_private_key(sock, private_key):
     )
 
 
-def send_arrays(sock, variables):
-    arrays = []
+def send_arrays(sock, variables, operation=None):
+    payloads = []
     descriptions = []
     for name, value in variables:
         array = np.asarray(value)
         if not array.flags.c_contiguous:
             array = np.ascontiguousarray(array)
-        arrays.append(array)
-        descriptions.append(
-            {
-                "name": name,
-                "dtype": array.dtype.str,
-                "shape": list(array.shape),
-                "nbytes": array.nbytes,
-            }
+        encoded = operation.encode(array) if operation is not None else None
+        payload = (
+            encoded.payload if encoded is not None else memoryview(array).cast("B")
         )
+        description = {
+            "name": name,
+            "dtype": array.dtype.str,
+            "shape": list(array.shape),
+            "nbytes": array.nbytes,
+            "payload_nbytes": len(payload),
+        }
+        if encoded is not None and encoded.operation is not None:
+            description["operation"] = encoded.operation
+        payloads.append(payload)
+        descriptions.append(description)
 
     _send_header(
         sock,
         {"type": "data", "variables": descriptions},
     )
-    for array in arrays:
-        sock.sendall(memoryview(array).cast("B"))
+    for payload in payloads:
+        sock.sendall(payload)
 
 
 def send_end(sock):
@@ -113,7 +122,9 @@ def receive_ack(sock):
     """Wait until the consumer confirms one complete data message."""
     header = _receive_header(sock)
     if header.get("type") != "ack":
-        raise RuntimeError(f"Expected socket acknowledgement, got: {header.get('type')}")
+        raise RuntimeError(
+            f"Expected socket acknowledgement, got: {header.get('type')}"
+        )
 
 
 def _recv_exact(sock, size):
@@ -159,9 +170,28 @@ def receive_message(sock):
                 f"Invalid size for {description['name']}: "
                 f"{description['nbytes']} != {expected_size}"
             )
-        payload = _recv_exact(sock, expected_size)
-        variables[description["name"]] = (
-            np.frombuffer(payload, dtype=dtype).reshape(shape).copy()
-        )
+        payload_size = description.get("payload_nbytes", expected_size)
+        if not isinstance(payload_size, int) or payload_size < 0:
+            raise ValueError(
+                f"Invalid payload size for {description['name']}: {payload_size!r}"
+            )
+        operation_description = description.get("operation")
+        if operation_description is None and payload_size != expected_size:
+            raise ValueError(
+                f"Unencoded payload for {description['name']} has invalid size: "
+                f"{payload_size} != {expected_size}"
+            )
+        payload = _recv_exact(sock, payload_size)
+        if operation_description is None:
+            array = np.frombuffer(payload, dtype=dtype).reshape(shape).copy()
+        else:
+            operation = data_operation_from_description(operation_description)
+            array = operation.decode(payload, dtype, shape)
+            if array.dtype != dtype or array.shape != shape:
+                raise ValueError(
+                    f"Data operation reconstructed invalid array for "
+                    f"{description['name']}: {array.shape}/{array.dtype}"
+                )
+        variables[description["name"]] = array
 
     return variables

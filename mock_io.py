@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from connection_security import decrypt_connection_info, load_private_key
+from data_operations import load_data_operation
 
 
 class IO(ABC):
@@ -44,11 +45,21 @@ class IO(ABC):
         if io_id == "sockets":
             from socket_io import SocketIO
 
-            output = SocketIO(settings, connection_info, private_key)
+            operation = load_data_operation(
+                getattr(settings, "compression_config", None)
+            )
+            output = SocketIO(
+                settings, connection_info, private_key, operation=operation
+            )
         elif io_id == "singlesocket":
             from single_socket_io import SingleSocketIO
 
-            output = SingleSocketIO(settings, connection_info, private_key)
+            operation = load_data_operation(
+                getattr(settings, "compression_config", None)
+            )
+            output = SingleSocketIO(
+                settings, connection_info, private_key, operation=operation
+            )
         elif io_id == "adios":
             from adios_io import AdiosIO
 

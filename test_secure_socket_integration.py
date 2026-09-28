@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import socket
 import subprocess
@@ -11,6 +12,7 @@ import nacl.public
 
 
 ROOT = Path(__file__).resolve().parent
+BLOSC2_AVAILABLE = importlib.util.find_spec("blosc2") is not None
 
 
 class SecureSocketIntegrationTests(unittest.TestCase):
@@ -24,7 +26,7 @@ class SecureSocketIntegrationTests(unittest.TestCase):
                 self.fail("consumer did not create its encrypted connection file")
             time.sleep(0.02)
 
-    def run_case(self, directory, consumer_script):
+    def run_case(self, directory, consumer_script, compression=False):
         private_key_file = directory / f"{consumer_script}-private.key"
         public_key_file = directory / f"{consumer_script}-public.key"
         private_key = nacl.public.PrivateKey.generate()
@@ -62,19 +64,28 @@ class SecureSocketIntegrationTests(unittest.TestCase):
             self.assertNotIn("127.0.0.1", serialized)
             self.assertNotIn("consumer_id", serialized)
 
+            dimension = "128" if compression else "4"
+            producer_command = [
+                sys.executable,
+                str(ROOT / "mockProducer.py"),
+                str(connection_file),
+                dimension,
+                dimension,
+                "1",
+                "--private-key",
+                str(private_key_file),
+                "--timing-log",
+                str(producer_log),
+            ]
+            if compression:
+                producer_command.extend(
+                    (
+                        "--compression-config",
+                        str(ROOT / "conf" / "blosc2-zstd.conf"),
+                    )
+                )
             producer = subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "mockProducer.py"),
-                    str(connection_file),
-                    "4",
-                    "4",
-                    "1",
-                    "--private-key",
-                    str(private_key_file),
-                    "--timing-log",
-                    str(producer_log),
-                ],
+                producer_command,
                 cwd=ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -105,6 +116,17 @@ class SecureSocketIntegrationTests(unittest.TestCase):
             ):
                 with self.subTest(consumer=consumer_script):
                     self.run_case(directory, consumer_script)
+
+    @unittest.skipUnless(BLOSC2_AVAILABLE, "blosc2 is not installed")
+    def test_blosc2_compression_on_single_and_three_socket_transfers(self):
+        with tempfile.TemporaryDirectory(prefix="mockapp-compression-test-") as temp:
+            directory = Path(temp)
+            for consumer_script in (
+                "mockConsumerSingleSocket.py",
+                "mockConsumerSockets.py",
+            ):
+                with self.subTest(consumer=consumer_script):
+                    self.run_case(directory, consumer_script, compression=True)
 
     def test_consumer_reuses_exact_port_after_process_is_killed(self):
         with tempfile.TemporaryDirectory(prefix="mockapp-port-reuse-test-") as temp:

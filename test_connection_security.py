@@ -1,3 +1,4 @@
+import importlib.util
 import io
 import json
 import socket
@@ -17,6 +18,7 @@ from connection_security import (
 from mockConsumerSingleSocket import parse_args as parse_single_consumer_args
 from mockConsumerSockets import parse_args as parse_consumer_args
 from mockProducer import Settings
+from data_operations import Blosc2ZstdOperation
 from socket_protocol import (
     prove_private_key,
     receive_message,
@@ -26,6 +28,7 @@ from socket_protocol import (
 
 
 ROOT = Path(__file__).resolve().parent
+BLOSC2_AVAILABLE = importlib.util.find_spec("blosc2") is not None
 
 
 class ConnectionSecurityTests(unittest.TestCase):
@@ -128,6 +131,42 @@ class ConnectionSecurityTests(unittest.TestCase):
 
         self.assertEqual(variables["iteration"].shape, ())
         self.assertEqual(variables["iteration"].item(), 42)
+
+    @unittest.skipUnless(BLOSC2_AVAILABLE, "blosc2 is not installed")
+    def test_socket_protocol_round_trips_compressed_array(self):
+        consumer, producer = socket.socketpair()
+        expected = np.tile(np.arange(4096, dtype=np.int16), 32)
+        operation = Blosc2ZstdOperation(
+            compression_level=1,
+            filter_name="shuffle",
+            threads=1,
+        )
+        self.assertIsNotNone(operation.encode(expected).operation)
+        try:
+            send_arrays(producer, [("trace", expected)], operation=operation)
+            variables = receive_message(consumer)
+        finally:
+            producer.close()
+            consumer.close()
+
+        np.testing.assert_array_equal(variables["trace"], expected)
+
+    def test_producer_reads_compression_config_option(self):
+        settings = Settings(
+            [
+                "mockProducer.py",
+                "output.bp",
+                "4",
+                "4",
+                "1",
+                "--private-key",
+                "private.key",
+                "--compression-config",
+                "compression.conf",
+            ]
+        )
+
+        self.assertEqual(settings.compression_config, "compression.conf")
 
 
 if __name__ == "__main__":

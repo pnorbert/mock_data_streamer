@@ -10,6 +10,13 @@ keypair once and keep the private key with the producer:
 python3 keygen.py generate keys/mockkey.pub keys/mockkey
 ```
 
+Blosc2 compression is optional. Install it in both the producer and consumer
+Python environments before selecting the Blosc2 operation:
+
+```bash
+python3 -m pip install 'blosc2>=4,<5'
+```
+
 The consumers encrypt all connection information with the public key. The
 producer decrypts it with the private key, then proves possession of that key
 by answering a fresh encrypted challenge on every socket. Neither key argument
@@ -53,6 +60,7 @@ terminal, run the producer with a 512x512 array and 10 output steps:
 ```bash
 python3 mockProducer.py socket-connection.json 512 512 10 \
     --private-key keys/mockkey \
+    --compression-config conf/blosc2-zstd.conf \
     --timing-log producer-timing.jsonl
 ```
 
@@ -95,15 +103,47 @@ In a second terminal, run the producer with a 512x512 array and 10 output steps:
 ```bash
 python3 mockProducer.py single-connection.json 512 512 10 \
     --private-key keys/mockkey \
+    --compression-config conf/blosc2-zstd.conf \
     --timing-log single-producer-timing.jsonl
 ```
 
 The single-socket consumer acknowledges each step after its output write
 finishes. This lets a producer with a socket timeout distinguish a completed
 step from a stalled consumer or a connection that failed during transfer. The
-connection information advertises protocol version 3, and the producer rejects
-older single-socket rendezvous files that cannot provide acknowledgements. The
-producer and consumer must therefore be upgraded together.
+connection information advertises protocol version 4, whose array framing can
+carry encoded-payload lengths and operation metadata. The producer rejects
+older rendezvous files, so the producer and consumer must be upgraded together.
+
+## Payload operations and compression
+
+Socket payload transformations implement the generic `DataOperation`
+interface in `data_operations.py`. An operation encodes a contiguous NumPy
+array and supplies a self-describing wire record; the corresponding registered
+decoder reconstructs the array before the consumer writes it. This boundary
+can also accommodate future lossy compressors or data-refactoring libraries.
+
+The included implementation uses Blosc2 with its Zstandard codec. Its settings
+live in a separate configuration file:
+
+```ini
+[compression]
+implementation = blosc2
+codec = zstd
+compression_level = 1
+filter = shuffle
+threads = 1
+```
+
+`conf/blosc2-zstd.conf` contains these recommended settings. `shuffle` uses
+each array's NumPy element size automatically, so the same operation handles
+the current `float64` arrays and later `int16` traces. Compression runs in the
+existing output worker. If a particular array would grow after compression,
+the operation sends that array uncompressed instead. The scalar iteration
+value will normally take this raw fallback.
+
+For a manually launched consumer, select the file with the producer's
+`--compression-config FILE` option, as in the examples above. Omitting the
+option sends every array uncompressed.
 
 ## Launching and recovering a consumer through SSH
 
@@ -116,6 +156,7 @@ host = ubuntupc
 working_directory = /home/pnorbert/Software/LAPD/mock_data_streamer
 python = /home/pnorbert/Software/LAPD/.venv/bin/python3
 script = mockConsumerSingleSocket.py
+compression_config = conf/blosc2-zstd.conf
 connection_file = conn.json
 output_directory = output
 file_interval_seconds = 3600
@@ -131,6 +172,12 @@ startup_timeout_seconds = 30
 retry_delay_seconds = 1
 max_relaunch_attempts = 0
 ```
+
+For a server configuration, `compression_config` is resolved relative to the
+server configuration file on the producer. The remote consumer does not read
+that file: the authenticated producer includes the operation description with
+each encoded array, and the consumer selects the registered decoder from that
+description. Omit `compression_config` to disable transformations.
 
 The SSH client must already be able to authenticate non-interactively. Paths
 other than `working_directory` are interpreted on the remote host. Multiple

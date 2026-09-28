@@ -23,6 +23,7 @@ from network_access import (
 )
 from socket_io import VARIABLE_PAIRS
 from socket_protocol import (
+    PROTOCOL_VERSION,
     receive_hello,
     receive_message,
     verify_producer_private_key,
@@ -95,6 +96,7 @@ def create_listener(bind_host, ports=None):
 def write_connection_file(path, advertise_host, listener, session_id, public_key):
     connection_info = {
         "id": "sockets",
+        "protocol_version": PROTOCOL_VERSION,
         "consumer_id": session_id,
         "host": advertise_host,
         "port": listener.getsockname()[1],

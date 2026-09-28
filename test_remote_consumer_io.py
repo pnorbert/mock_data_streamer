@@ -12,6 +12,7 @@ import numpy as np
 
 from connection_security import encrypt_connection_info
 from mock_io import BufferedIO
+from socket_protocol import PROTOCOL_VERSION
 from remote_consumer_io import (
     RestartingSingleSocketIO,
     SSHConsumerLauncher,
@@ -119,6 +120,23 @@ class RemoteConsumerTests(unittest.TestCase):
         self.assertEqual(config.ntfy_token_env, "TEST_NTFY_TOKEN")
         self.assertEqual(config.ntfy_timeout_seconds, 2)
 
+    def test_server_config_resolves_compression_config_relative_to_itself(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            parser = configparser.ConfigParser()
+            parser.read_string(CONFIG)
+            parser["server"]["compression_config"] = "codec/blosc2.conf"
+            path = directory / "server.conf"
+            with path.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+
+            config = ServerConfig(path)
+
+        self.assertEqual(
+            config.compression_config,
+            directory / "codec" / "blosc2.conf",
+        )
+
     def test_ssh_socket_connector_uses_stdio_forwarding(self):
         config = SimpleNamespace(
             ssh_command=["ssh", "-J", "bastion"],
@@ -168,7 +186,7 @@ class RemoteConsumerTests(unittest.TestCase):
         private_key = nacl.public.PrivateKey.generate()
         connection_info = {
             "id": "singlesocket",
-            "protocol_version": 3,
+            "protocol_version": PROTOCOL_VERSION,
             "consumer_id": "session",
             "host": "127.0.0.1",
             "port": 8501,
@@ -185,13 +203,21 @@ class RemoteConsumerTests(unittest.TestCase):
             socket_timeout_seconds=5,
             max_relaunch_attempts=1,
             retry_delay_seconds=0,
+            compression_config="compression.conf",
         )
         settings = SimpleNamespace(destination="unused")
         socket_output = mock.Mock()
+        operation = mock.Mock()
 
-        with mock.patch(
-            "remote_consumer_io.SingleSocketIO", return_value=socket_output
-        ) as single_socket:
+        with (
+            mock.patch(
+                "remote_consumer_io.load_data_operation",
+                return_value=operation,
+            ) as load_operation,
+            mock.patch(
+                "remote_consumer_io.SingleSocketIO", return_value=socket_output
+            ) as single_socket,
+        ):
             output = RestartingSingleSocketIO(
                 settings, private_key, config=config, launcher=launcher
             )
@@ -200,13 +226,15 @@ class RemoteConsumerTests(unittest.TestCase):
         connector = single_socket.call_args.kwargs["connector"]
         self.assertIsInstance(connector, SSHSocketConnector)
         self.assertIs(connector.config, config)
+        self.assertIs(single_socket.call_args.kwargs["operation"], operation)
+        load_operation.assert_called_once_with("compression.conf")
         socket_output.close.assert_called_once_with()
 
     def test_ssh_launch_and_stream_share_control_connection(self):
         private_key = nacl.public.PrivateKey.generate()
         connection_info = {
             "id": "singlesocket",
-            "protocol_version": 3,
+            "protocol_version": PROTOCOL_VERSION,
             "consumer_id": "session",
             "host": "127.0.0.1",
             "port": 8501,
@@ -254,7 +282,7 @@ class RemoteConsumerTests(unittest.TestCase):
         private_key = nacl.public.PrivateKey.generate()
         connection_info = {
             "id": "singlesocket",
-            "protocol_version": 3,
+            "protocol_version": PROTOCOL_VERSION,
             "consumer_id": "session",
             "host": "127.0.0.1",
             "port": 8501,
@@ -314,7 +342,7 @@ class RemoteConsumerTests(unittest.TestCase):
         private_key = nacl.public.PrivateKey.generate()
         connection_info = {
             "id": "singlesocket",
-            "protocol_version": 3,
+            "protocol_version": PROTOCOL_VERSION,
             "consumer_id": "session",
             "host": "127.0.0.1",
             "port": 8501,
@@ -364,7 +392,7 @@ class RemoteConsumerTests(unittest.TestCase):
         private_key = nacl.public.PrivateKey.generate()
         connection_info = {
             "id": "singlesocket",
-            "protocol_version": 3,
+            "protocol_version": PROTOCOL_VERSION,
             "consumer_id": "session",
             "host": "127.0.0.1",
             "port": 8501,

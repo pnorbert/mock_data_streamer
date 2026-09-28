@@ -1,7 +1,13 @@
 import socket
 
 from mock_io import IO
-from socket_protocol import prove_private_key, send_arrays, send_end, send_hello
+from socket_protocol import (
+    PROTOCOL_VERSION,
+    prove_private_key,
+    send_arrays,
+    send_end,
+    send_hello,
+)
 
 
 VARIABLE_PAIRS = (
@@ -12,9 +18,16 @@ VARIABLE_PAIRS = (
 
 
 class SocketIO(IO):
-    def __init__(self, settings, connection_info, private_key):
+    def __init__(self, settings, connection_info, private_key, operation=None):
         del settings
         self._sockets = []
+        self._operation = operation
+        version = connection_info.get("protocol_version")
+        if version != PROTOCOL_VERSION:
+            raise ValueError(
+                "Socket connection information uses unsupported protocol "
+                f"version {version!r}; expected {PROTOCOL_VERSION}"
+            )
         host = connection_info.get("host")
         if not isinstance(host, str) or not host:
             raise ValueError("Socket connection info has no valid host")
@@ -45,6 +58,7 @@ class SocketIO(IO):
             send_arrays(
                 connection,
                 [(name, data[name]) for name in pair],
+                operation=self._operation,
             )
 
     def close(self):

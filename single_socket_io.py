@@ -2,6 +2,7 @@ import socket
 
 from mock_io import IO
 from socket_protocol import (
+    PROTOCOL_VERSION,
     prove_private_key,
     receive_ack,
     send_arrays,
@@ -11,12 +12,19 @@ from socket_protocol import (
 
 
 VARIABLES = ("iteration", "d1", "d2", "d3", "d4", "d5", "d6")
-PROTOCOL_VERSION = 3
 
 
 class SingleSocketIO(IO):
-    def __init__(self, settings, connection_info, private_key, connector=None):
+    def __init__(
+        self,
+        settings,
+        connection_info,
+        private_key,
+        connector=None,
+        operation=None,
+    ):
         self._socket = None
+        self._operation = operation
         version = connection_info.get("protocol_version")
         if version != PROTOCOL_VERSION:
             raise ValueError(
@@ -47,7 +55,11 @@ class SingleSocketIO(IO):
         self._socket = connection
 
     def write_data(self, data):
-        send_arrays(self._socket, [(name, data[name]) for name in VARIABLES])
+        send_arrays(
+            self._socket,
+            [(name, data[name]) for name in VARIABLES],
+            operation=self._operation,
+        )
         receive_ack(self._socket)
 
     def close(self):
