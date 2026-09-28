@@ -15,6 +15,7 @@ from mock_io import BufferedIO
 from remote_consumer_io import (
     RestartingSingleSocketIO,
     SSHConsumerLauncher,
+    SSHSocketConnector,
     ServerConfig,
 )
 
@@ -83,6 +84,151 @@ class RemoteConsumerTests(unittest.TestCase):
                 parser.write(stream)
             with self.assertRaisesRegex(ValueError, "allow_ip_range"):
                 ServerConfig(path)
+
+    def test_socket_transport_defaults_to_direct_and_rejects_unknown_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.assertEqual(self.make_config(directory).socket_transport, "direct")
+
+            parser = configparser.ConfigParser()
+            parser.read_string(CONFIG)
+            parser["server"]["socket_transport"] = "socks"
+            path = directory / "invalid.conf"
+            with path.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+            with self.assertRaisesRegex(ValueError, "socket_transport"):
+                ServerConfig(path)
+
+    def test_ssh_socket_connector_uses_stdio_forwarding(self):
+        config = SimpleNamespace(
+            ssh_command=["ssh", "-J", "bastion"],
+            host="user@destination",
+        )
+        local_socket = mock.Mock()
+        ssh_socket = mock.Mock()
+        process = mock.Mock()
+        process.wait.return_value = 0
+
+        with (
+            mock.patch(
+                "remote_consumer_io.socket.socketpair",
+                return_value=(local_socket, ssh_socket),
+            ),
+            mock.patch(
+                "remote_consumer_io.subprocess.Popen", return_value=process
+            ) as popen,
+        ):
+            connection = SSHSocketConnector(config)(("127.0.0.1", 8501), timeout=5)
+
+        arguments = popen.call_args.args[0]
+        self.assertEqual(
+            arguments,
+            [
+                "ssh",
+                "-J",
+                "bastion",
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-W",
+                "127.0.0.1:8501",
+                "user@destination",
+            ],
+        )
+        self.assertIs(popen.call_args.kwargs["stdin"], ssh_socket)
+        self.assertIs(popen.call_args.kwargs["stdout"], ssh_socket)
+        local_socket.settimeout.assert_called_once_with(5)
+        ssh_socket.close.assert_called_once_with()
+
+        connection.close()
+        local_socket.close.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=0.2)
+
+    def test_ssh_transport_is_passed_to_single_socket_io(self):
+        private_key = nacl.public.PrivateKey.generate()
+        connection_info = {
+            "id": "singlesocket",
+            "protocol_version": 3,
+            "consumer_id": "session",
+            "host": "127.0.0.1",
+            "port": 8501,
+        }
+        envelope = json.loads(
+            encrypt_connection_info(connection_info, private_key.public_key)
+        )
+        launcher = mock.Mock()
+        launcher.launch.return_value = envelope
+        config = SimpleNamespace(
+            host="user@destination",
+            ssh_command=["ssh"],
+            socket_transport="ssh",
+            socket_timeout_seconds=5,
+            max_relaunch_attempts=1,
+            retry_delay_seconds=0,
+        )
+        settings = SimpleNamespace(destination="unused")
+        socket_output = mock.Mock()
+
+        with mock.patch(
+            "remote_consumer_io.SingleSocketIO", return_value=socket_output
+        ) as single_socket:
+            output = RestartingSingleSocketIO(
+                settings, private_key, config=config, launcher=launcher
+            )
+            output.close()
+
+        connector = single_socket.call_args.kwargs["connector"]
+        self.assertIsInstance(connector, SSHSocketConnector)
+        self.assertIs(connector.config, config)
+        socket_output.close.assert_called_once_with()
+
+    def test_ssh_launch_and_stream_share_control_connection(self):
+        private_key = nacl.public.PrivateKey.generate()
+        connection_info = {
+            "id": "singlesocket",
+            "protocol_version": 3,
+            "consumer_id": "session",
+            "host": "127.0.0.1",
+            "port": 8501,
+        }
+        envelope = json.loads(
+            encrypt_connection_info(connection_info, private_key.public_key)
+        )
+        settings = SimpleNamespace(destination="unused")
+        socket_output = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.make_config(Path(temporary))
+            config.socket_transport = "ssh"
+            launcher = mock.Mock()
+            launcher.launch.return_value = envelope
+            with (
+                mock.patch(
+                    "remote_consumer_io.SSHConsumerLauncher",
+                    return_value=launcher,
+                ) as launcher_class,
+                mock.patch(
+                    "remote_consumer_io.SingleSocketIO",
+                    return_value=socket_output,
+                ) as single_socket,
+                mock.patch("remote_consumer_io.subprocess.run") as run,
+            ):
+                output = RestartingSingleSocketIO(
+                    settings, private_key, config=config
+                )
+                launch_command = launcher_class.call_args.args[1]
+                connector = single_socket.call_args.kwargs["connector"]
+                self.assertEqual(connector.ssh_command, launch_command)
+                control_options = " ".join(launch_command)
+                self.assertIn("ControlMaster=auto", control_options)
+                self.assertIn("ControlPath=", control_options)
+                self.assertIn("ControlPersist=yes", control_options)
+                output.close()
+
+            cleanup_arguments = run.call_args.args[0]
+            self.assertIn("-O", cleanup_arguments)
+            self.assertIn("exit", cleanup_arguments)
+            self.assertIn("-S", cleanup_arguments)
 
     def test_disconnect_retries_failed_step_without_resending_successes(self):
         private_key = nacl.public.PrivateKey.generate()

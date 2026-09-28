@@ -4,7 +4,9 @@ import configparser
 import json
 import math
 import shlex
+import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,6 +73,11 @@ class ServerConfig:
         self.ssh_command = shlex.split(values.get("ssh_command", "ssh"))
         if not self.ssh_command:
             raise ValueError("server ssh_command must not be empty")
+        self.socket_transport = (
+            values.get("socket_transport", "direct").strip().lower()
+        )
+        if self.socket_transport not in ("direct", "ssh"):
+            raise ValueError("server socket_transport must be 'direct' or 'ssh'")
         self.startup_timeout_seconds = self._positive_float(
             values, "startup_timeout_seconds", 30.0
         )
@@ -149,14 +156,15 @@ class ServerConfig:
 class SSHConsumerLauncher:
     """Start a detached remote process and return its encrypted rendezvous."""
 
-    def __init__(self, config):
+    def __init__(self, config, ssh_command=None):
         self.config = config
+        self.ssh_command = ssh_command or config.ssh_command
 
     def launch(self):
         command = self._remote_command()
         try:
             completed = subprocess.run(
-                [*self.config.ssh_command, self.config.host, command],
+                [*self.ssh_command, self.config.host, command],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -266,6 +274,162 @@ class SSHConsumerLauncher:
         )
 
 
+class SSHStreamSocket:
+    """Socket-compatible endpoint backed by an OpenSSH stdio forwarding channel."""
+
+    family = socket.AF_UNIX
+
+    def __init__(self, connection, process, error_file):
+        self._connection = connection
+        self._process = process
+        self._error_file = error_file
+        self._closed = False
+
+    def sendall(self, data):
+        try:
+            return self._connection.sendall(data)
+        except OSError as exc:
+            self._raise_tunnel_error(exc)
+
+    def recv_into(self, buffer):
+        try:
+            received = self._connection.recv_into(buffer)
+        except OSError as exc:
+            self._raise_tunnel_error(exc)
+        if received == 0:
+            self._raise_tunnel_error()
+        return received
+
+    def settimeout(self, timeout):
+        self._connection.settimeout(timeout)
+
+    def _raise_tunnel_error(self, cause=None):
+        returncode = self._process.poll()
+        if returncode is None or returncode == 0:
+            if cause is not None:
+                raise cause
+            return
+        detail = self._read_error()
+        message = f"SSH socket tunnel exited with status {returncode}"
+        if detail:
+            message += f": {detail}"
+        error = OSError(message)
+        if cause is not None:
+            raise error from cause
+        raise error
+
+    def _read_error(self):
+        try:
+            self._error_file.flush()
+            self._error_file.seek(0)
+            return self._error_file.read().decode("utf-8", errors="replace").strip()
+        except (OSError, ValueError):
+            return ""
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._connection.close()
+        try:
+            self._process.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait()
+        finally:
+            self._error_file.close()
+
+
+class SSHSocketConnector:
+    """Create socket-like streams through the configured SSH destination."""
+
+    def __init__(self, config, ssh_command=None):
+        self.config = config
+        self.ssh_command = ssh_command or config.ssh_command
+
+    def __call__(self, address, timeout=None):
+        host, port = address
+        target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        local_socket, ssh_socket = socket.socketpair()
+        error_file = tempfile.TemporaryFile()
+        try:
+            process = subprocess.Popen(
+                [
+                    *self.ssh_command,
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-W",
+                    target,
+                    self.config.host,
+                ],
+                stdin=ssh_socket,
+                stdout=ssh_socket,
+                stderr=error_file,
+                close_fds=True,
+            )
+        except Exception:
+            local_socket.close()
+            error_file.close()
+            raise
+        finally:
+            ssh_socket.close()
+        local_socket.settimeout(timeout)
+        return SSHStreamSocket(local_socket, process, error_file)
+
+
+class SSHControlConnection:
+    """Pin launch and forwarding channels to one SSH server connection."""
+
+    def __init__(self, config):
+        self.config = config
+        self._directory = tempfile.TemporaryDirectory(prefix="mockapp-ssh-")
+        self.control_path = str(Path(self._directory.name) / "control")
+        executable, *arguments = config.ssh_command
+        self.ssh_command = [
+            executable,
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            f"ControlPath={self.control_path}",
+            "-o",
+            "ControlPersist=yes",
+            *arguments,
+        ]
+        self._closed = False
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        executable, *arguments = self.config.ssh_command
+        try:
+            subprocess.run(
+                [
+                    executable,
+                    "-S",
+                    self.control_path,
+                    *arguments,
+                    "-O",
+                    "exit",
+                    self.config.host,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5.0,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            self._directory.cleanup()
+
+
 class RestartingSingleSocketIO(IO):
     """Reconnect a remote consumer and retry only the interrupted output."""
 
@@ -280,10 +444,28 @@ class RestartingSingleSocketIO(IO):
         self._timing_log = timing_log
         self._private_key = private_key
         self._config = config or ServerConfig(settings.destination)
-        self._launcher = launcher or SSHConsumerLauncher(self._config)
+        self._ssh_control = None
+        ssh_command = getattr(self._config, "ssh_command", None)
+        if (
+            getattr(self._config, "socket_transport", "direct") == "ssh"
+            and launcher is None
+        ):
+            self._ssh_control = SSHControlConnection(self._config)
+            ssh_command = self._ssh_control.ssh_command
+        self._launcher = launcher or SSHConsumerLauncher(self._config, ssh_command)
+        self._connector = None
+        if getattr(self._config, "socket_transport", "direct") == "ssh":
+            self._connector = SSHSocketConnector(
+                self._config, ssh_command=ssh_command
+            )
         self._output = None
         self._closed = False
-        self._connect_with_retries("launch")
+        try:
+            self._connect_with_retries("launch")
+        except Exception:
+            if self._ssh_control is not None:
+                self._ssh_control.close()
+            raise
 
     def _new_output(self):
         envelope = self._launcher.launch()
@@ -293,7 +475,12 @@ class RestartingSingleSocketIO(IO):
         socket_settings = SimpleNamespace(
             socket_timeout_seconds=self._config.socket_timeout_seconds
         )
-        return SingleSocketIO(socket_settings, connection_info, self._private_key)
+        return SingleSocketIO(
+            socket_settings,
+            connection_info,
+            self._private_key,
+            connector=self._connector,
+        )
 
     def _connect_with_retries(self, reason):
         attempt = 0
@@ -360,4 +547,8 @@ class RestartingSingleSocketIO(IO):
         if self._closed:
             return
         self._closed = True
-        self._discard_output()
+        try:
+            self._discard_output()
+        finally:
+            if self._ssh_control is not None:
+                self._ssh_control.close()

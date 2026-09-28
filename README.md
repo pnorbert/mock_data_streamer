@@ -137,6 +137,26 @@ other than `working_directory` are interpreted on the remote host. Multiple
 allowed networks can be written as a comma-separated list. `ssh_command` may
 be set when SSH options or a different executable are needed.
 
+The data connection is direct by default. If the producer can SSH to the
+consumer host but cannot connect to its listening port (for example, when SSH
+uses a bastion), route the single-socket stream through the same SSH command:
+
+```ini
+socket_transport = ssh
+bind_host = 127.0.0.1
+advertise_host = 127.0.0.1
+allow_ip_range = 127.0.0.1/32
+```
+
+This runs an OpenSSH stdio forward equivalent to `ssh -W HOST:PORT` and uses
+the host, keys, `ProxyJump`, and other options from the normal SSH
+configuration. No local listening port is allocated. The SSH forwarding
+process is closed and re-created along with each consumer connection. Launch
+and forwarding channels share a private OpenSSH control connection so a
+load-balanced SSH destination cannot send them to different servers. Use
+`socket_transport = direct` (or omit the setting) when the producer can reach
+the advertised socket normally.
+
 Start the producer normally, using the configuration as its destination:
 
 ```bash

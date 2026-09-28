@@ -15,7 +15,7 @@ PROTOCOL_VERSION = 3
 
 
 class SingleSocketIO(IO):
-    def __init__(self, settings, connection_info, private_key):
+    def __init__(self, settings, connection_info, private_key, connector=None):
         self._socket = None
         version = connection_info.get("protocol_version")
         if version != PROTOCOL_VERSION:
@@ -34,9 +34,11 @@ class SingleSocketIO(IO):
             raise ValueError("Single-socket connection info has no valid consumer_id")
 
         timeout = getattr(settings, "socket_timeout_seconds", None)
-        connection = socket.create_connection((host, port), timeout=timeout)
+        connect = connector or socket.create_connection
+        connection = connect((host, port), timeout=timeout)
         try:
-            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if connection.family in (socket.AF_INET, socket.AF_INET6):
+                connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             prove_private_key(connection, private_key)
             send_hello(connection, VARIABLES, consumer_id)
         except Exception:
