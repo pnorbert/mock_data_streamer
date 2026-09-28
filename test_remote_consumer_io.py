@@ -99,6 +99,26 @@ class RemoteConsumerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "socket_transport"):
                 ServerConfig(path)
 
+    def test_server_config_reads_ntfy_settings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parser = configparser.ConfigParser()
+            parser.read_string(CONFIG)
+            parser["server"]["ntfy_topic_info"] = "test-info-topic"
+            parser["server"]["ntfy_topic_action"] = "test-action-topic"
+            parser["server"]["ntfy_server_url"] = "https://ntfy.example.test"
+            parser["server"]["ntfy_token_env"] = "TEST_NTFY_TOKEN"
+            parser["server"]["ntfy_timeout_seconds"] = "2"
+            path = Path(temporary) / "server.conf"
+            with path.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+            config = ServerConfig(path)
+
+        self.assertEqual(config.ntfy_topic_info, "test-info-topic")
+        self.assertEqual(config.ntfy_topic_action, "test-action-topic")
+        self.assertEqual(config.ntfy_server_url, "https://ntfy.example.test")
+        self.assertEqual(config.ntfy_token_env, "TEST_NTFY_TOKEN")
+        self.assertEqual(config.ntfy_timeout_seconds, 2)
+
     def test_ssh_socket_connector_uses_stdio_forwarding(self):
         config = SimpleNamespace(
             ssh_command=["ssh", "-J", "bastion"],
@@ -289,6 +309,56 @@ class RemoteConsumerTests(unittest.TestCase):
         retried = second.write_data.call_args.args[0]
         np.testing.assert_array_equal(retried["d1"], steps[3]["d1"])
         self.assertEqual(retried["iteration"].item(), 3)
+
+    def test_notifies_on_start_disconnect_and_restart(self):
+        private_key = nacl.public.PrivateKey.generate()
+        connection_info = {
+            "id": "singlesocket",
+            "protocol_version": 3,
+            "consumer_id": "session",
+            "host": "127.0.0.1",
+            "port": 8501,
+        }
+        envelope = json.loads(
+            encrypt_connection_info(connection_info, private_key.public_key)
+        )
+        launcher = mock.Mock()
+        launcher.launch.return_value = envelope
+        notifier = mock.Mock()
+        config = SimpleNamespace(
+            host="example-host",
+            socket_timeout_seconds=5,
+            max_relaunch_attempts=1,
+            retry_delay_seconds=0,
+        )
+        settings = SimpleNamespace(destination="unused")
+        first = mock.Mock()
+        first.write_data.side_effect = OSError("connection reset")
+        second = mock.Mock()
+
+        with mock.patch(
+            "remote_consumer_io.SingleSocketIO", side_effect=[first, second]
+        ):
+            output = RestartingSingleSocketIO(
+                settings,
+                private_key,
+                config=config,
+                launcher=launcher,
+                notifier=notifier,
+            )
+            output.write_data({})
+            output.close()
+
+        titles = [call.args[0] for call in notifier.notify.call_args_list]
+        self.assertEqual(
+            titles,
+            [
+                "Mock data server started",
+                "Mock data server disconnected",
+                "Mock data server restarted",
+            ],
+        )
+        notifier.close.assert_called_once_with()
 
     def test_retried_in_flight_step_precedes_buffered_steps(self):
         private_key = nacl.public.PrivateKey.generate()

@@ -1,6 +1,7 @@
 import json
 import math
 import threading
+import time
 from collections import deque
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -34,6 +35,7 @@ class IO(ABC):
                     settings, "output_interval_seconds", 3.0
                 ),
                 timing_log=timing_log,
+                notifier=output.notifier,
             )
 
         connection_info = cls._read_connection_info(settings.destination, private_key)
@@ -123,8 +125,17 @@ class IO(ABC):
 class BufferedIO(IO):
     """Queue output steps and write them from a dedicated worker thread."""
 
+    HIGH_BUFFER_PERCENT = 80
+    HIGH_BUFFER_NOTIFICATION_INTERVAL_SECONDS = 3600
+
     def __init__(
-        self, output, buffer_seconds, output_interval_seconds, timing_log=None
+        self,
+        output,
+        buffer_seconds,
+        output_interval_seconds,
+        timing_log=None,
+        notifier=None,
+        clock=time.monotonic,
     ):
         if not math.isfinite(buffer_seconds) or buffer_seconds <= 0:
             raise ValueError("Buffer duration must be greater than zero")
@@ -133,7 +144,19 @@ class BufferedIO(IO):
 
         self._output = output
         self._timing_log = timing_log
+        self._notifier = notifier
+        self._clock = clock
         self._capacity = max(1, math.ceil(buffer_seconds / output_interval_seconds))
+        self._notification_thresholds = tuple(
+            (percent, max(1, math.ceil(self._capacity * percent / 100)))
+            for percent in (20, 40, 60)
+        )
+        self._high_notification_depth = max(
+            1, math.ceil(self._capacity * self.HIGH_BUFFER_PERCENT / 100)
+        )
+        self._notified_thresholds = set()
+        self._last_high_notification_at = None
+        self._dropped_since_high_notification = 0
         self._buffer = deque()
         self._condition = threading.Condition()
         self._closing = False
@@ -166,12 +189,58 @@ class BufferedIO(IO):
 
     def _enqueue(self, pending):
         dropped = None
+        low_notifications = []
+        high_notification = None
         with self._condition:
             self._raise_if_unavailable()
             if len(self._buffer) >= self._capacity:
                 dropped = self._drop_one_pending_step()
+                self._dropped_since_high_notification += 1
             self._buffer.append(pending)
+            depth = len(self._buffer)
+            for percent, threshold_depth in self._notification_thresholds:
+                if (
+                    depth >= threshold_depth
+                    and percent not in self._notified_thresholds
+                ):
+                    self._notified_thresholds.add(percent)
+                    low_notifications.append(percent)
+            now = self._clock()
+            if depth >= self._high_notification_depth and (
+                self._last_high_notification_at is None
+                or now - self._last_high_notification_at
+                >= self.HIGH_BUFFER_NOTIFICATION_INTERVAL_SECONDS
+            ):
+                high_notification = self._dropped_since_high_notification
+                self._dropped_since_high_notification = 0
+                self._last_high_notification_at = now
             self._condition.notify()
+
+        if self._notifier is not None:
+            for percent in low_notifications:
+                priority = 4 if percent >= 60 else 3
+                self._notifier.notify(
+                    f"Output ring buffer {percent}% full",
+                    f"The output ring buffer contains {depth} of "
+                    f"{self._capacity} queued snapshots.",
+                    priority=priority,
+                    tags=("warning",),
+                )
+            if high_notification is not None:
+                loss_message = (
+                    f" {high_notification} "
+                    f"snapshot{' was' if high_notification == 1 else 's were'} "
+                    "discarded since the previous high-buffer notification."
+                    if high_notification
+                    else ""
+                )
+                self._notifier.notify(
+                    "Output ring buffer at least 80% full",
+                    f"The output ring buffer contains {depth} of "
+                    f"{self._capacity} queued snapshots.{loss_message}",
+                    priority=5,
+                    tags=("warning",),
+                )
 
         if dropped is not None and self._timing_log is not None:
             self._timing_log.record(

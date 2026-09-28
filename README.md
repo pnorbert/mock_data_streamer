@@ -189,6 +189,32 @@ Relaunch and retry activity is recorded as `consumer.connection_lost`,
 `consumer.launch`, `consumer.launch_retry`, and `io.retry` events in the
 producer timing log.
 
+### ntfy notifications
+
+Remote-server configurations can enable best-effort ntfy notifications:
+
+```ini
+ntfy_topic_info = my-info-topic
+# Reserved for future notifications that require an operator action:
+ntfy_topic_action = my-action-topic
+# Optional settings shown with their defaults:
+ntfy_server_url = https://ntfy.sh
+ntfy_token_env = NTFY_TOKEN
+ntfy_timeout_seconds = 5
+```
+
+All current notifications are sent asynchronously to `ntfy_topic_info` when
+the remote consumer starts, restarts, or disconnects. Buffer notifications at
+20%, 40%, and 60% are each sent once per producer run. While the buffer is at
+least 80% full, a high-buffer notification is sent immediately and then at
+most once per hour. An hourly notification reports the number of snapshots
+discarded since the preceding high-buffer notification when that number is
+nonzero. `ntfy_topic_action` is parsed but is not used yet. Notification
+failures do not interrupt output; they are recorded as `notification.failed`
+events in the producer timing log. Set the access token in the environment
+rather than the configuration file, for example
+`export NTFY_TOKEN=tk_...` before starting the producer.
+
 ### Deliberately blocking test consumer
 
 `mockConsumerSingleSocketBlocking.py` exercises producer buffering by sleeping

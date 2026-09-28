@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from connection_security import decrypt_connection_info
 from mock_io import IO
+from ntfy_notifications import NtfyNotifier
 from single_socket_io import SingleSocketIO
 
 
@@ -84,6 +85,21 @@ class ServerConfig:
         self.socket_timeout_seconds = self._positive_float(
             values, "socket_timeout_seconds", 30.0
         )
+        self.ntfy_topic_info = values.get("ntfy_topic_info", "").strip() or None
+        self.ntfy_topic_action = (
+            values.get("ntfy_topic_action", "").strip() or None
+        )
+        self.ntfy_server_url = values.get(
+            "ntfy_server_url", "https://ntfy.sh"
+        ).strip()
+        self.ntfy_token_env = values.get("ntfy_token_env", "NTFY_TOKEN").strip()
+        self.ntfy_timeout_seconds = self._positive_float(
+            values, "ntfy_timeout_seconds", 5.0
+        )
+        if (self.ntfy_topic_info or self.ntfy_topic_action) and not self.ntfy_server_url:
+            raise ValueError("server ntfy_server_url must not be empty")
+        if (self.ntfy_topic_info or self.ntfy_topic_action) and not self.ntfy_token_env:
+            raise ValueError("server ntfy_token_env must not be empty")
         self.retry_delay_seconds = self._nonnegative_float(
             values, "retry_delay_seconds", 1.0
         )
@@ -440,10 +456,14 @@ class RestartingSingleSocketIO(IO):
         config=None,
         launcher=None,
         timing_log=None,
+        notifier=None,
     ):
         self._timing_log = timing_log
         self._private_key = private_key
         self._config = config or ServerConfig(settings.destination)
+        self._notifier = notifier or NtfyNotifier.from_config(
+            self._config, timing_log=timing_log
+        )
         self._ssh_control = None
         ssh_command = getattr(self._config, "ssh_command", None)
         if (
@@ -465,7 +485,13 @@ class RestartingSingleSocketIO(IO):
         except Exception:
             if self._ssh_control is not None:
                 self._ssh_control.close()
+            if self._notifier is not None:
+                self._notifier.close()
             raise
+
+    @property
+    def notifier(self):
+        return self._notifier
 
     def _new_output(self):
         envelope = self._launcher.launch()
@@ -494,6 +520,16 @@ class RestartingSingleSocketIO(IO):
                     attempt=attempt,
                     host=self._config.host,
                 )
+                if self._notifier is not None:
+                    restarted = reason == "connection_lost"
+                    action = "restarted" if restarted else "started"
+                    self._notifier.notify(
+                        f"Mock data server {action}",
+                        f"Remote consumer on {self._config.host} {action} "
+                        f"(attempt {attempt}).",
+                        priority=3,
+                        tags=("white_check_mark",),
+                    )
                 return
             except (OSError, EOFError, RuntimeError):
                 maximum = self._config.max_relaunch_attempts
@@ -522,6 +558,14 @@ class RestartingSingleSocketIO(IO):
                 "consumer.connection_lost",
                 error_type=type(failure).__name__,
             )
+            if self._notifier is not None:
+                self._notifier.notify(
+                    "Mock data server disconnected",
+                    f"Connection to {self._config.host} was lost: "
+                    f"{type(failure).__name__}: {failure}",
+                    priority=5,
+                    tags=("rotating_light",),
+                )
             self._discard_output(graceful=False)
             self._connect_with_retries("connection_lost")
             try:
@@ -550,5 +594,9 @@ class RestartingSingleSocketIO(IO):
         try:
             self._discard_output()
         finally:
-            if self._ssh_control is not None:
-                self._ssh_control.close()
+            try:
+                if self._ssh_control is not None:
+                    self._ssh_control.close()
+            finally:
+                if self._notifier is not None:
+                    self._notifier.close()

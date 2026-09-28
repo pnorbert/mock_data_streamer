@@ -1,5 +1,6 @@
 import threading
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -40,6 +41,17 @@ class RecordingLog:
 
     def record(self, event, **fields):
         self.records.append((event, fields))
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
 
 
 class BufferedIOTests(unittest.TestCase):
@@ -156,6 +168,50 @@ class BufferedIOTests(unittest.TestCase):
         io = BufferedIO(output, buffer_seconds=10, output_interval_seconds=3)
         self.assertEqual(io.capacity, 4)
         io.close()
+
+    def test_low_buffer_alerts_once_and_high_alerts_hourly_with_losses(self):
+        gate = threading.Event()
+        output = RecordingOutput(gate)
+        notifier = mock.Mock()
+        clock = FakeClock()
+        io = BufferedIO(
+            output,
+            buffer_seconds=30,
+            output_interval_seconds=3,
+            notifier=notifier,
+            clock=clock,
+        )
+
+        io.write_data(0)
+        self.assertTrue(output.started.wait(timeout=1))
+        for value in range(1, 12):
+            io.write_data(value)
+        clock.advance(3599)
+        io.write_data(12)
+        self.assertEqual(notifier.notify.call_count, 4)
+        clock.advance(1)
+        io.write_data(13)
+        io.write_data(14)
+        gate.set()
+        io.close()
+
+        titles = [call.args[0] for call in notifier.notify.call_args_list]
+        self.assertEqual(
+            titles,
+            [
+                "Output ring buffer 20% full",
+                "Output ring buffer 40% full",
+                "Output ring buffer 60% full",
+                "Output ring buffer at least 80% full",
+                "Output ring buffer at least 80% full",
+            ],
+        )
+        self.assertNotIn("discarded", notifier.notify.call_args_list[3].args[1])
+        self.assertIn(
+            "3 snapshots were discarded",
+            notifier.notify.call_args_list[4].args[1],
+        )
+        self.assertEqual(io.dropped_steps, 4)
 
 
 if __name__ == "__main__":
