@@ -349,8 +349,12 @@ class RemoteConsumerTests(unittest.TestCase):
                     settings, private_key, config=config
                 )
                 launch_command = launcher_class.call_args.args[1]
-                self.assertIn("ControlMaster=auto", " ".join(launch_command))
-                self.assertIn("BatchMode=yes", " ".join(launch_command))
+                launch_options = " ".join(launch_command)
+                self.assertIn("ControlMaster=auto", launch_options)
+                self.assertIn("BatchMode=yes", launch_options)
+                self.assertIn("PreferredAuthentications=publickey", launch_options)
+                self.assertIn("PasswordAuthentication=no", launch_options)
+                self.assertIn("KbdInteractiveAuthentication=no", launch_options)
                 self.assertIsNone(single_socket.call_args.kwargs["connector"])
                 output.close()
 

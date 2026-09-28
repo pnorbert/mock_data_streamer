@@ -205,6 +205,9 @@ that connection, so a load-balanced SSH destination cannot send them to
 different servers. Use `socket_transport = direct` (or omit the setting) when
 the producer can reach the advertised socket normally; the control connection
 is retained for service restarts even though data does not travel through it.
+The control connection is strictly noninteractive and public-key-only. If a
+certificate has expired, SSH fails instead of falling through to a password or
+keyboard-interactive password-plus-OTP prompt.
 
 Start the producer normally, using the configuration as its destination:
 
