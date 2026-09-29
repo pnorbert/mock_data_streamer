@@ -307,6 +307,26 @@ MOCKAPP_RUN_SOCKET_INTEGRATION=1 \
     python3 -m unittest -v test_buffered_single_socket.py
 ```
 
+## Analyzing a remote experiment
+
+Generate a point-in-time Markdown report from a remote-server configuration:
+
+```bash
+./analyze_remote_experiment.py \
+    conf/nersc_from_ornl_24h_blosc2.conf \
+    nersc-ornl-24h-report.md
+```
+
+The analyzer derives the local producer timing and stdout logs from the
+configured consumer log names. It reports progress, failures, cadence and
+latency distributions, buffer occupancy, BP storage use, latency incidents,
+and an hourly-segment estimate of the configured payload compression. All
+remote operations share one multiplexed SSH connection. To reuse a control
+connection owned by an active producer or another process, pass
+`--ssh-control-path PATH` or set `MOCKAPP_SSH_CONTROL_PATH`. The analyzer does
+not close a borrowed connection. Use `--skip-compression` when only timing and
+storage statistics are needed.
+
 ## Running without ADIOS2
 
 The consumers do not require the `adios2` Python module. When it is unavailable,
